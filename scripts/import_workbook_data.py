@@ -210,6 +210,7 @@ def import_with_xml(path: Path) -> dict:
         },
         "itemCodes": item_codes,
         "sellerCodes": seller_codes,
+        "customerBook": [],
         "customers": customers,
         "lots": lots,
         "audit": [

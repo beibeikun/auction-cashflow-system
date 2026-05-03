@@ -9,6 +9,7 @@ createApp({
       activeTab: localStorage.getItem("auction.activeTab") || "record",
       editingLotId: "",
       editingCustomerId: "",
+      editingCustomerBookId: "",
       settlementCustomer: "",
       settlementSellerScope: "all",
       settlementFilters: {
@@ -30,6 +31,10 @@ createApp({
       liveEntrySyncTimer: null,
       entry: this.blankEntry(),
       customerForm: this.blankCustomer(),
+      customerBookForm: this.blankCustomerBook(),
+      customerSaveError: "",
+      customerBookSaveError: "",
+      customerBookFilter: "",
       csvFile: null,
       csvCustomersOnly: false,
       importMessage: "",
@@ -64,7 +69,7 @@ createApp({
       for (const customer of this.customers) {
         if (customer.bidderNo !== "" && !seenCustomers.has(String(customer.bidderNo))) {
           seenCustomers.add(String(customer.bidderNo));
-          options.push({ value: `customer:${customer.bidderNo}`, label: `${customer.bidderNo} · ${customer.name || "未命名"}` });
+          options.push({ value: `customer:${customer.bidderNo}`, label: `${customer.bidderNo} · ${this.customerDisplayName(customer) || "未命名"}` });
         }
         if (customer.sellerLabel && !seenSellerLabels.has(customer.sellerLabel)) {
           seenSellerLabels.add(customer.sellerLabel);
@@ -168,36 +173,59 @@ createApp({
     customers() {
       return [...(this.state?.customers || [])].sort((a, b) => Number(a.bidderNo) - Number(b.bidderNo));
     },
+    customerBook() {
+      return [...(this.state?.customerBook || [])].sort((a, b) => (a.actualName || "").localeCompare(b.actualName || "", "zh-Hans-CN"));
+    },
+    filteredCustomerBook() {
+      const words = this.customerBookFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return this.customerBook;
+      return this.customerBook.filter((book) => {
+        const text = [book.id, book.actualName, book.phone, book.address, book.antiqueLicenseNo].join(" ").toLowerCase();
+        return words.every((word) => text.includes(word));
+      });
+    },
+    registeredCustomerRows() {
+      return this.customers.map((customer) => ({
+        ...customer,
+        book: this.customerBookEntry(customer),
+        displayName: this.customerDisplayName(customer),
+        displayPhone: this.customerPhone(customer),
+        displayAddress: this.customerAddress(customer),
+        displayAntiqueLicenseNo: this.customerAntiqueLicenseNo(customer)
+      }));
+    },
     settlementOptions() {
       const groups = new Map();
       for (const customer of this.customers) {
         if (customer.bidderNo === "") continue;
-        const key = String(customer.bidderNo);
+        const key = customer.customerBookId ? `book:${customer.customerBookId}` : `bidder:${customer.bidderNo}`;
         if (!groups.has(key)) {
           groups.set(key, {
+            key,
+            customerBookId: customer.customerBookId || "",
             bidderNo: customer.bidderNo,
-            name: customer.actualSellerName || customer.name,
+            name: this.customerDisplayName(customer),
             rows: [],
             sellerLabels: []
           });
         }
         const group = groups.get(key);
         group.rows.push(customer);
-        if (!group.name && (customer.actualSellerName || customer.name)) group.name = customer.actualSellerName || customer.name;
+        if (!group.name && this.customerDisplayName(customer)) group.name = this.customerDisplayName(customer);
         if (customer.sellerLabel && !group.sellerLabels.includes(customer.sellerLabel)) group.sellerLabels.push(customer.sellerLabel);
       }
       return [...groups.values()].sort((a, b) => Number(a.bidderNo) - Number(b.bidderNo));
     },
     settlementCurrent() {
-      if (!this.settlementCustomer && this.settlementOptions[0]) this.settlementCustomer = String(this.settlementOptions[0].bidderNo);
-      return this.settlementOptions.find((row) => String(row.bidderNo) === String(this.settlementCustomer)) || this.settlementOptions[0] || {};
+      if (!this.settlementCustomer && this.settlementOptions[0]) this.settlementCustomer = this.settlementOptions[0].key;
+      return this.settlementOptions.find((row) => row.key === this.settlementCustomer) || this.settlementOptions[0] || {};
     },
     settlementSellerOptions() {
       const rows = this.settlementCurrent.rows || [];
       const options = [{ value: "all", label: "全部假名" }];
       for (const row of rows) {
         if (!row.sellerLabel || options.some((option) => option.value === row.sellerLabel)) continue;
-        options.push({ value: row.sellerLabel, label: `${row.sellerLabel} · ${row.name || row.actualSellerName || "未命名"}` });
+        options.push({ value: row.sellerLabel, label: `${row.sellerLabel} · ${this.customerDisplayName(row) || "未命名"}` });
       }
       return options;
     },
@@ -212,7 +240,7 @@ createApp({
     settlementCustomerName() {
       if (this.selectedSettlementSellerLabel) {
         const selected = (this.settlementCurrent.rows || []).find((row) => row.sellerLabel === this.selectedSettlementSellerLabel);
-        return selected?.actualSellerName || selected?.name || this.settlementCurrent.name || "";
+        return this.customerDisplayName(selected) || this.settlementCurrent.name || "";
       }
       return this.settlementCurrent.name || "";
     },
@@ -294,7 +322,23 @@ createApp({
       return { itemNo: "", sellerCode: "", itemCode: "", quantity: 1, buyerNo: "", priceK: "", note: "" };
     },
     blankCustomer() {
-      return { bidderNo: "", sellerLabel: "", name: "", actualSellerName: "", phone: "", sellerRate: "", buyerRate: "", returnRate: "" };
+      return {
+        customerBookId: "",
+        bidderNo: "",
+        sellerLabel: "",
+        name: "",
+        actualSellerName: "",
+        actualName: "",
+        phone: "",
+        address: "",
+        antiqueLicenseNo: "",
+        sellerRate: "",
+        buyerRate: "",
+        returnRate: ""
+      };
+    },
+    blankCustomerBook() {
+      return { actualName: "", phone: "", address: "", antiqueLicenseNo: "" };
     },
     async api(path, options = {}) {
       const response = await fetch(path, {
@@ -327,20 +371,70 @@ createApp({
       this.settlementCustomer = value;
       this.settlementSellerScope = "all";
     },
+    customerBookEntry(customer = {}) {
+      if (!customer.customerBookId) return null;
+      return this.state?.customerBook.find((row) => String(row.id) === String(customer.customerBookId)) || null;
+    },
+    customerDisplayName(customer = {}) {
+      const book = this.customerBookEntry(customer);
+      return book?.actualName || customer.actualSellerName || customer.name || "";
+    },
+    customerPhone(customer = {}) {
+      return this.customerBookEntry(customer)?.phone || customer.phone || "";
+    },
+    customerAddress(customer = {}) {
+      return this.customerBookEntry(customer)?.address || customer.address || "";
+    },
+    customerAntiqueLicenseNo(customer = {}) {
+      return this.customerBookEntry(customer)?.antiqueLicenseNo || customer.antiqueLicenseNo || "";
+    },
+    applyCustomerBookSelection() {
+      const book = this.state?.customerBook.find((row) => row.id === this.customerForm.customerBookId);
+      if (!book) {
+        this.customerForm.actualName = "";
+        this.customerForm.phone = "";
+        this.customerForm.address = "";
+        this.customerForm.antiqueLicenseNo = "";
+        return;
+      }
+      this.customerForm.actualName = book.actualName || "";
+      this.customerForm.phone = book.phone || "";
+      this.customerForm.address = book.address || "";
+      this.customerForm.antiqueLicenseNo = book.antiqueLicenseNo || "";
+      const existing = this.customers.find((row) => row.customerBookId === book.id && row.bidderNo !== "");
+      if (existing) this.customerForm.bidderNo = existing.bidderNo;
+    },
+    referenceCustomerBook(book) {
+      this.editingCustomerId = "";
+      this.customerSaveError = "";
+      this.customerForm = {
+        ...this.blankCustomer(),
+        customerBookId: book.id,
+        actualName: book.actualName || "",
+        phone: book.phone || "",
+        address: book.address || "",
+        antiqueLicenseNo: book.antiqueLicenseNo || ""
+      };
+      this.applyCustomerBookSelection();
+      document.querySelector(".customer-registration-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
     isSettlementReturn(row) {
       return Boolean(row.returnType) || row.sellerAction === "顶待退" || row.sellerAction === "流待退" || row.buyerAction === "顶待退" || row.buyerAction === "流待退";
     },
     settlementRowsFor(mode, ignoreStatus = false) {
       const bidderNo = this.settlementCurrent.bidderNo;
-      if (bidderNo === "" || bidderNo === undefined) return [];
+      const customerBookId = this.settlementCurrent.customerBookId || "";
+      if ((bidderNo === "" || bidderNo === undefined) && !customerBookId) return [];
       const label = this.selectedSettlementSellerLabel;
       const visibleActions = mode === "seller" ? ["可付", "顶待退", "流待退"] : ["可收", "顶待退", "流待退"];
       return this.lots
         .filter((row) => {
           if (mode === "buyer" && this.settlementFilters.excludeBuyer) return false;
           if (mode === "seller" && this.settlementFilters.excludeSeller) return false;
-          if (mode === "buyer" && String(row.buyerNo) !== String(bidderNo)) return false;
-          if (mode === "seller" && String(row.sellerNo) !== String(bidderNo)) return false;
+          if (mode === "buyer" && customerBookId && row.buyerCustomerBookId !== customerBookId) return false;
+          if (mode === "seller" && customerBookId && row.sellerCustomerBookId !== customerBookId) return false;
+          if (mode === "buyer" && !customerBookId && String(row.buyerNo) !== String(bidderNo)) return false;
+          if (mode === "seller" && !customerBookId && String(row.sellerNo) !== String(bidderNo)) return false;
           if (label && row.sellerLabel !== label) return false;
 
           const isReturn = this.isSettlementReturn(row);
@@ -488,20 +582,60 @@ createApp({
       await this.load();
     },
     async saveCustomer() {
+      this.customerSaveError = "";
       const payload = { ...this.customerForm };
       if (this.editingCustomerId) payload.id = this.editingCustomerId;
-      await this.api("/api/customers", { method: "POST", body: JSON.stringify(payload) });
+      try {
+        await this.api("/api/customers", { method: "POST", body: JSON.stringify(payload) });
+      } catch (error) {
+        this.customerSaveError = String(error.message || error);
+        if (this.customerSaveError.includes("customer_book_bidder_conflict")) this.customerSaveError = "同一客户在本场已有买货号牌，不能登记不同买货号牌";
+        else if (this.customerSaveError.includes("customer_book_name_required")) this.customerSaveError = "新客户需要填写实际名称";
+        else if (this.customerSaveError.includes("customer_book_not_found")) this.customerSaveError = "请选择有效的客户簿客户";
+        return;
+      }
       this.editingCustomerId = "";
       this.customerForm = this.blankCustomer();
       await this.load();
     },
     editCustomer(customer) {
       this.editingCustomerId = customer.id;
-      this.customerForm = { ...this.blankCustomer(), ...customer };
+      this.customerSaveError = "";
+      const book = this.customerBookEntry(customer);
+      this.customerForm = { ...this.blankCustomer(), ...customer, ...(book || {}) };
     },
     async deleteCustomer(id) {
       if (!confirm("删除这个客户？")) return;
       await this.api(`/api/customers/${id}`, { method: "DELETE" });
+      await this.load();
+    },
+    async saveCustomerBook() {
+      this.customerBookSaveError = "";
+      const payload = { ...this.customerBookForm };
+      if (this.editingCustomerBookId) payload.id = this.editingCustomerBookId;
+      try {
+        await this.api("/api/customer-book", { method: "POST", body: JSON.stringify(payload) });
+      } catch (error) {
+        this.customerBookSaveError = String(error.message || error).includes("customer_book_name_required") ? "客户簿需要填写实际名称" : String(error.message || error);
+        return;
+      }
+      this.editingCustomerBookId = "";
+      this.customerBookForm = this.blankCustomerBook();
+      await this.load();
+    },
+    editCustomerBook(book) {
+      this.editingCustomerBookId = book.id;
+      this.customerBookSaveError = "";
+      this.customerBookForm = { ...this.blankCustomerBook(), ...book };
+    },
+    async deleteCustomerBook(id) {
+      if (!confirm("删除这个客户簿客户？已被本场登记引用的客户不能删除。")) return;
+      try {
+        await this.api(`/api/customer-book/${id}`, { method: "DELETE" });
+      } catch (error) {
+        this.customerBookSaveError = String(error.message || error).includes("customer_book_in_use") ? "这个客户已被本场登记引用，不能删除" : String(error.message || error);
+        return;
+      }
       await this.load();
     },
     async saveMeta() {
@@ -597,9 +731,9 @@ createApp({
       await this.load();
     },
     async clearAuction() {
-      if (!confirm("确认清空本场所有成交数据？客户、代码和场次设置会保留。")) return;
+      if (!confirm("确认清空本场所有成交数据和客户信息？代码和场次设置会保留。")) return;
       const cleared = await this.api("/api/auction/clear", { method: "POST", body: JSON.stringify({}) });
-      alert(`已清空 ${cleared.count} 条成交数据`);
+      alert(`已清空 ${cleared.count} 条成交数据、${cleared.customers} 条客户信息`);
       this.clearSelection();
       this.resetEntry();
       await this.load();
@@ -679,10 +813,14 @@ createApp({
         buyerNo,
         amount,
         sellerNo: seller.bidderNo ?? "",
+        sellerCustomerBookId: seller.customerBookId || "",
+        buyerCustomerBookId: buyer.customerBookId || "",
         sellerLabel,
         sellerLotNo: sellerLabel && sellerLotCount > 0 ? `${sellerLabel}${sellerLotCount}` : "",
-        sellerName: seller.name || "",
-        buyerName: buyer.name || "",
+        sellerName: this.customerDisplayName(seller),
+        buyerName: this.customerDisplayName(buyer),
+        sellerPhone: this.customerPhone(seller),
+        buyerPhone: this.customerPhone(buyer),
         itemName: item ? `${item.name}${lot.quantity === "" ? "" : this.number(lot.quantity) > 3 ? " 山売" : ` ${lot.quantity}件`}` : "",
         sellerRate,
         sellerCommission,
@@ -848,7 +986,7 @@ createApp({
                 <form class="entry-form" @input="markEntryDirty" @submit.prevent="saveEntry">
                   <datalist id="sellerCodes"><option v-for="row in state.sellerCodes" :key="row.code" :value="row.code">{{ row.label }}</option></datalist>
                   <datalist id="itemCodes"><option v-for="row in state.itemCodes" :key="row.code" :value="row.code">{{ row.name }}</option></datalist>
-                  <datalist id="buyerNos"><option v-for="row in state.customers" :key="row.id || row.bidderNo" :value="row.bidderNo">{{ row.name }}</option></datalist>
+                  <datalist id="buyerNos"><option v-for="row in customers" :key="row.id || row.bidderNo" :value="row.bidderNo">{{ customerDisplayName(row) }}</option></datalist>
                   <div class="entry-grid">
                     <div class="field"><label>拍品编号</label><input v-model="entry.itemNo" type="number" autocomplete="off" required /></div>
                     <div class="field"><label>货主缩写</label><input v-model="entry.sellerCode" list="sellerCodes" autocomplete="off" required /></div>
@@ -949,7 +1087,7 @@ createApp({
             <section class="panel settlement-controls">
               <div class="panel-body grid">
                 <div class="settlement-picker">
-                  <div class="field"><label>客户号牌</label><select :value="settlementCustomer" @change="changeSettlementCustomer($event.target.value)"><option v-for="row in settlementOptions" :key="row.bidderNo" :value="String(row.bidderNo)">{{ row.bidderNo }} · {{ row.name || "未命名" }}</option></select></div>
+                  <div class="field"><label>客户号牌</label><select :value="settlementCustomer" @change="changeSettlementCustomer($event.target.value)"><option v-for="row in settlementOptions" :key="row.key" :value="row.key">{{ row.bidderNo }} · {{ row.name || "未命名" }}</option></select></div>
                   <div class="field"><label>假名范围</label><select v-model="settlementSellerScope"><option v-for="option in settlementSellerOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></div>
                 </div>
                 <div class="settlement-switches no-print">
@@ -975,22 +1113,93 @@ createApp({
           </section>
         </section>
 
-        <section v-else-if="activeTab === 'customers'" class="split">
-          <section class="panel alt">
-            <div class="panel-head"><h2>{{ editingCustomerId ? "修改客户" : "客户登记" }}</h2><button v-if="editingCustomerId" @click="editingCustomerId = ''; customerForm = blankCustomer()">取消</button></div>
-            <div class="panel-body"><form class="form-grid" @submit.prevent="saveCustomer">
-              <div class="field"><label>客户号牌</label><input v-model="customerForm.bidderNo" type="number" /></div><div class="field"><label>出货号牌</label><input v-model="customerForm.sellerLabel" /></div>
-              <div class="field full"><label>客户名称</label><input v-model="customerForm.name" required /></div><div class="field full"><label>货主实际名称</label><input v-model="customerForm.actualSellerName" /></div><div class="field full"><label>电话/备注</label><input v-model="customerForm.phone" /></div>
-              <div class="field"><label>出货佣金</label><input v-model="customerForm.sellerRate" type="number" /></div><div class="field"><label>买货佣金</label><input v-model="customerForm.buyerRate" type="number" /></div><div class="field"><label>退货佣金</label><input v-model="customerForm.returnRate" type="number" /></div>
-              <div class="actions field full"><button class="primary" type="submit">{{ editingCustomerId ? "保存客户" : "新增客户" }}</button></div>
-            </form></div>
+        <section v-else-if="activeTab === 'customers'" class="customer-layout">
+          <section class="panel alt customer-registration-panel">
+            <div class="panel-head">
+              <h2>{{ editingCustomerId ? "修改本场登记" : "本场客户登记" }}</h2>
+              <button v-if="editingCustomerId" @click="editingCustomerId = ''; customerSaveError = ''; customerForm = blankCustomer()">取消</button>
+            </div>
+            <div class="panel-body">
+              <form class="form-grid" @submit.prevent="saveCustomer">
+                <div class="field full">
+                  <label>从客户簿引用</label>
+                  <select v-model="customerForm.customerBookId" @change="applyCustomerBookSelection">
+                    <option value="">新登记客户 / 不引用客户簿</option>
+                    <option v-for="book in customerBook" :key="book.id" :value="book.id">{{ book.actualName }} · {{ book.phone || "无电话" }}</option>
+                  </select>
+                </div>
+                <div class="field"><label>买货号牌</label><input v-model="customerForm.bidderNo" type="number" /></div>
+                <div class="field"><label>出货号牌</label><input v-model="customerForm.sellerLabel" /></div>
+                <div class="field full"><label>实际名称</label><input v-model="customerForm.actualName" :readonly="Boolean(customerForm.customerBookId)" :required="!customerForm.customerBookId" /></div>
+                <div class="field full"><label>电话</label><input v-model="customerForm.phone" :readonly="Boolean(customerForm.customerBookId)" /></div>
+                <div class="field full"><label>地址</label><input v-model="customerForm.address" :readonly="Boolean(customerForm.customerBookId)" /></div>
+                <div class="field full"><label>古物商证编号</label><input v-model="customerForm.antiqueLicenseNo" :readonly="Boolean(customerForm.customerBookId)" /></div>
+                <div class="field"><label>出货佣金</label><input v-model="customerForm.sellerRate" type="number" /></div>
+                <div class="field"><label>买货佣金</label><input v-model="customerForm.buyerRate" type="number" /></div>
+                <div class="field"><label>退货佣金</label><input v-model="customerForm.returnRate" type="number" /></div>
+                <div v-if="customerSaveError" class="notice field full">{{ customerSaveError }}</div>
+                <div class="actions field full"><button class="primary" type="submit">{{ editingCustomerId ? "保存登记" : "新增登记" }}</button></div>
+              </form>
+            </div>
           </section>
-          <section class="panel"><div class="panel-head"><h2>客户资料</h2></div><div class="table-wrap"><table><thead><tr><th>客户号牌</th><th>出货号牌</th><th>客户名称</th><th>实际名称</th><th>电话</th><th>佣金</th><th class="no-print">操作</th></tr></thead><tbody><tr v-for="row in customers" :key="row.id || row.bidderNo"><td>{{ row.bidderNo }}</td><td>{{ row.sellerLabel }}</td><td>{{ row.name }}</td><td>{{ row.actualSellerName }}</td><td>{{ row.phone }}</td><td>{{ [row.sellerRate, row.buyerRate, row.returnRate].map((v) => v === '' ? '-' : v + '%').join(' / ') }}</td><td class="no-print"><button class="icon-btn" @click="editCustomer(row)">改</button><button class="icon-btn danger" @click="deleteCustomer(row.id)">删</button></td></tr></tbody></table></div></section>
+
+          <section class="panel">
+            <div class="panel-head"><h2>本场登记客户</h2></div>
+            <div class="table-wrap">
+              <table class="customer-table">
+                <thead><tr><th>客户簿ID</th><th>买货号牌</th><th>出货号牌</th><th>实际名称</th><th>电话</th><th>地址</th><th>古物商证编号</th><th>佣金</th><th class="no-print">操作</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in registeredCustomerRows" :key="row.id || row.bidderNo">
+                    <td>{{ row.customerBookId ? row.customerBookId.slice(0, 8) : "-" }}</td><td>{{ row.bidderNo }}</td><td>{{ row.sellerLabel }}</td><td>{{ row.displayName }}</td><td>{{ row.displayPhone }}</td><td>{{ row.displayAddress }}</td><td>{{ row.displayAntiqueLicenseNo }}</td><td>{{ [row.sellerRate, row.buyerRate, row.returnRate].map((v) => v === '' ? '-' : v + '%').join(' / ') }}</td>
+                    <td class="no-print"><button class="icon-btn" @click="editCustomer(row)">改</button><button class="icon-btn danger" @click="deleteCustomer(row.id)">删</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel alt">
+            <div class="panel-head">
+              <h2>{{ editingCustomerBookId ? "修改客户簿" : "永久客户簿" }}</h2>
+              <button v-if="editingCustomerBookId" @click="editingCustomerBookId = ''; customerBookSaveError = ''; customerBookForm = blankCustomerBook()">取消</button>
+            </div>
+            <div class="panel-body">
+              <form class="form-grid" @submit.prevent="saveCustomerBook">
+                <div class="field full"><label>实际名称</label><input v-model="customerBookForm.actualName" required /></div>
+                <div class="field full"><label>电话</label><input v-model="customerBookForm.phone" /></div>
+                <div class="field full"><label>地址</label><input v-model="customerBookForm.address" /></div>
+                <div class="field full"><label>古物商证编号</label><input v-model="customerBookForm.antiqueLicenseNo" /></div>
+                <div v-if="customerBookSaveError" class="notice field full">{{ customerBookSaveError }}</div>
+                <div class="actions field full"><button class="primary" type="submit">{{ editingCustomerBookId ? "保存客户簿" : "新增客户簿客户" }}</button></div>
+              </form>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>永久客户簿列表</h2>
+              <div class="toolbar no-print">
+                <input class="search" v-model="customerBookFilter" placeholder="搜索客户簿" />
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="customer-book-table">
+                <thead><tr><th class="no-print">操作</th><th>ID</th><th>实际名称</th><th>电话</th><th>地址</th><th>古物商证编号</th></tr></thead>
+                <tbody>
+                  <tr v-for="book in filteredCustomerBook" :key="book.id">
+                    <td class="no-print"><button @click="referenceCustomerBook(book)">引用</button><button class="icon-btn" @click="editCustomerBook(book)">改</button><button class="icon-btn danger" @click="deleteCustomerBook(book.id)">删</button></td>
+                    <td>{{ book.id.slice(0, 8) }}</td><td>{{ book.actualName }}</td><td>{{ book.phone }}</td><td>{{ book.address }}</td><td>{{ book.antiqueLicenseNo }}</td>
+                  </tr>
+                  <tr v-if="!filteredCustomerBook.length"><td colspan="6" class="empty">{{ customerBookFilter ? "没有匹配的客户簿客户" : "暂无客户簿客户" }}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section v-else-if="activeTab === 'settings'" class="grid">
           <section class="panel"><div class="panel-head"><h2>场次设置</h2></div><div class="panel-body"><form class="form-grid" @submit.prevent="saveMeta"><div class="field full"><label>拍卖会名称</label><input v-model="state.meta.eventName" /></div><div class="field"><label>开拍时间</label><input v-model="state.meta.startTime" /></div><div class="field"><label>默认出货佣金</label><input v-model="state.meta.sellerCommissionRate" type="number" /></div><div class="field"><label>默认买货佣金</label><input v-model="state.meta.buyerCommissionRate" type="number" /></div><div class="field"><label>默认退货佣金</label><input v-model="state.meta.returnCommissionRate" type="number" /></div><div class="actions field full"><button class="primary" type="submit">保存设置</button></div></form></div></section>
-          <section class="panel"><div class="panel-head"><h2>数据导入与清场</h2></div><div class="panel-body grid"><div class="form-grid"><div class="field"><label>导入 CSV</label><input type="file" accept=".csv,text/csv" @change="filePicked" /></div><label class="checkline"><input type="checkbox" v-model="csvCustomersOnly" /><span>只导入客户信息</span></label></div><div class="notice">CSV 表头可使用旧表字段：客户号牌、出货号牌、客户名称、拍品编号、货主出货号牌缩写、拍品名称缩写、拍品数量、买家客户号牌、千单位成交价。</div><div class="actions"><button class="primary" @click="importCsv">导入 CSV</button><button class="danger" @click="clearAuction">清空本场拍卖数据</button></div><div class="muted">{{ importMessage }}</div></div></section>
+          <section class="panel"><div class="panel-head"><h2>数据导入与清场</h2></div><div class="panel-body grid"><div class="form-grid"><div class="field"><label>导入 CSV</label><input type="file" accept=".csv,text/csv" @change="filePicked" /></div><label class="checkline"><input type="checkbox" v-model="csvCustomersOnly" /><span>只导入客户信息</span></label></div><div class="notice">CSV 表头可使用旧表字段：客户号牌、出货号牌、客户名称、拍品编号、货主出货号牌缩写、拍品名称缩写、拍品数量、买家客户号牌、千单位成交价。</div><div class="actions"><button class="primary" @click="importCsv">导入 CSV</button><button class="danger" @click="clearAuction">清空本场拍卖与客户数据</button></div><div class="muted">{{ importMessage }}</div></div></section>
           <section class="code-grid"><section class="panel"><div class="panel-head"><h2>拍品代码</h2></div><div class="panel-body field"><label>每行：缩写,名称</label><textarea id="item-code-text" :value="codeText(state.itemCodes, 'name')"></textarea><div class="actions"><button class="primary" @click="saveItemCodes">保存拍品代码</button></div></div></section><section class="panel"><div class="panel-head"><h2>出货号牌代码</h2></div><div class="panel-body field"><label>每行：英文缩写,日文号牌</label><textarea id="seller-code-text" :value="codeText(state.sellerCodes, 'label')"></textarea><div class="actions"><button class="primary" @click="saveSellerCodes">保存号牌代码</button></div></div></section></section>
         </section>
 

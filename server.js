@@ -49,6 +49,7 @@ function defaultStore() {
     customers: [
       { bidderNo: -1, sellerLabel: "", name: "流拍", actualSellerName: "", phone: "", sellerRate: "", buyerRate: "", returnRate: "" }
     ],
+    customerBook: [],
     lots: [],
     liveEntry: {},
     audit: []
@@ -74,6 +75,7 @@ function normalizeStore(raw) {
     itemCodes: Array.isArray(raw.itemCodes) ? raw.itemCodes : fresh.itemCodes,
     sellerCodes: Array.isArray(raw.sellerCodes) ? raw.sellerCodes : fresh.sellerCodes,
     customers: Array.isArray(raw.customers) ? raw.customers : fresh.customers,
+    customerBook: Array.isArray(raw.customerBook) ? raw.customerBook : fresh.customerBook,
     lots: Array.isArray(raw.lots) ? raw.lots : [],
     liveEntry: raw.liveEntry && typeof raw.liveEntry === "object" ? raw.liveEntry : {},
     audit: Array.isArray(raw.audit) ? raw.audit.slice(-250) : []
@@ -140,6 +142,7 @@ function cleanLot(input, existing = {}) {
 function cleanCustomer(input, existing = {}) {
   return {
     id: existing.id || input.id || randomUUID(),
+    customerBookId: String(input.customerBookId || existing.customerBookId || "").trim(),
     bidderNo: toNumber(input.bidderNo, ""),
     sellerLabel: String(input.sellerLabel || "").trim(),
     name: String(input.name || "").trim(),
@@ -149,6 +152,69 @@ function cleanCustomer(input, existing = {}) {
     buyerRate: input.buyerRate === "" ? "" : toNumber(input.buyerRate, ""),
     returnRate: input.returnRate === "" ? "" : toNumber(input.returnRate, "")
   };
+}
+
+function cleanCustomerBook(input, existing = {}) {
+  const now = new Date().toISOString();
+  return {
+    id: existing.id || input.id || randomUUID(),
+    actualName: String(input.actualName || input.actualSellerName || input.name || "").trim(),
+    phone: String(input.phone || "").trim(),
+    address: String(input.address || "").trim(),
+    antiqueLicenseNo: String(input.antiqueLicenseNo || "").trim(),
+    createdAt: existing.createdAt || now,
+    updatedAt: now
+  };
+}
+
+function customerBookById(id) {
+  return state.customerBook.find((row) => String(row.id) === String(id));
+}
+
+function customerDisplayName(customer = {}) {
+  const book = customer.customerBookId ? customerBookById(customer.customerBookId) : null;
+  return book?.actualName || customer.actualSellerName || customer.name || "";
+}
+
+function customerPhone(customer = {}) {
+  const book = customer.customerBookId ? customerBookById(customer.customerBookId) : null;
+  return book?.phone || customer.phone || "";
+}
+
+function prepareCustomerRegistration(input, existing = {}) {
+  let customerBookId = String(input.customerBookId || existing.customerBookId || "").trim();
+  let book = customerBookId ? customerBookById(customerBookId) : null;
+  if (customerBookId && !book) return { error: "customer_book_not_found" };
+
+  const wantsNewBook = !customerBookId && [input.actualName, input.address, input.antiqueLicenseNo].some((value) => String(value || "").trim() !== "");
+  if (wantsNewBook) {
+    book = cleanCustomerBook(input);
+    if (!book.actualName) return { error: "customer_book_name_required" };
+    state.customerBook.push(book);
+    customerBookId = book.id;
+  }
+
+  const match = customerBookId
+    ? state.customers.find((row) => String(row.customerBookId || "") === customerBookId && String(row.id) !== String(existing.id || input.id || ""))
+    : null;
+  const inputBidderNo = input.bidderNo === "" || input.bidderNo === null || input.bidderNo === undefined ? "" : toNumber(input.bidderNo, "");
+  const bidderNo = match?.bidderNo !== "" && match?.bidderNo !== undefined ? match.bidderNo : inputBidderNo;
+  if (match && inputBidderNo !== "" && String(match.bidderNo) !== String(inputBidderNo)) {
+    return { error: "customer_book_bidder_conflict", bidderNo: match.bidderNo };
+  }
+
+  const customer = cleanCustomer(
+    {
+      ...input,
+      customerBookId,
+      bidderNo,
+      name: input.name || book?.actualName || existing.name || "",
+      actualSellerName: input.actualSellerName || book?.actualName || existing.actualSellerName || "",
+      phone: input.phone || book?.phone || existing.phone || ""
+    },
+    existing
+  );
+  return { customer, book };
 }
 
 function cleanLiveEntry(input) {
@@ -378,14 +444,46 @@ async function routeApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/customer-book") {
+    const input = await readJson(req);
+    const index = state.customerBook.findIndex((row) => String(row.id) === String(input.id));
+    const existing = index >= 0 ? state.customerBook[index] : {};
+    const book = cleanCustomerBook(input, existing);
+    if (!book.actualName) return sendJson(res, 400, { error: "customer_book_name_required" });
+    if (index >= 0) state.customerBook[index] = book;
+    else state.customerBook.push(book);
+    addAudit(index >= 0 ? "更新客户簿" : "新增客户簿", book.actualName);
+    await persist();
+    broadcast();
+    sendJson(res, 200, book);
+    return;
+  }
+
+  if (req.method === "DELETE" && pathname.startsWith("/api/customer-book/")) {
+    const id = decodeURIComponent(pathname.split("/").pop());
+    if (state.customers.some((row) => String(row.customerBookId || "") === id)) {
+      return sendJson(res, 400, { error: "customer_book_in_use" });
+    }
+    const before = state.customerBook.length;
+    state.customerBook = state.customerBook.filter((row) => String(row.id) !== id);
+    if (state.customerBook.length === before) return sendJson(res, 404, { error: "customer_book_not_found" });
+    addAudit("删除客户簿", id);
+    await persist();
+    broadcast();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/customers") {
     const input = await readJson(req);
     const index = state.customers.findIndex((row) => String(row.id) === String(input.id));
     const existing = index >= 0 ? state.customers[index] : {};
-    const customer = cleanCustomer(input, existing);
+    const prepared = prepareCustomerRegistration(input, existing);
+    if (prepared.error) return sendJson(res, 400, prepared);
+    const customer = prepared.customer;
     if (index >= 0) state.customers[index] = customer;
     else state.customers.push(customer);
-    addAudit(index >= 0 ? "更新客户" : "新增客户", `${customer.bidderNo} ${customer.name}`);
+    addAudit(index >= 0 ? "更新客户" : "新增客户", `${customer.bidderNo} ${customerDisplayName(customer)}`);
     await persist();
     broadcast();
     sendJson(res, 200, customer);
@@ -436,11 +534,13 @@ async function routeApi(req, res, pathname) {
 
   if (req.method === "POST" && pathname === "/api/auction/clear") {
     const count = state.lots.length;
+    const customers = state.customers.filter((row) => Number(row.bidderNo) !== -1).length;
     state.lots = [];
-    addAudit("清空本场拍卖数据", `${count} 条成交`);
+    state.customers = defaultStore().customers;
+    addAudit("清空本场拍卖数据", `${count} 条成交，${customers} 条客户`);
     await persist();
     broadcast();
-    sendJson(res, 200, { ok: true, count });
+    sendJson(res, 200, { ok: true, count, customers });
     return;
   }
 
@@ -516,10 +616,14 @@ function derive(lot) {
     ...lot,
     amount,
     sellerNo: seller.bidderNo ?? "",
+    sellerCustomerBookId: seller.customerBookId || "",
+    buyerCustomerBookId: buyer.customerBookId || "",
     sellerLabel,
     sellerLotNo: sellerLabel ? `${sellerLabel}${state.lots.filter((row) => row.id === lot.id || (row.sellerCode === lot.sellerCode && Number(row.itemNo) <= Number(lot.itemNo || Infinity))).length}` : "",
-    sellerName: seller.name || "",
-    buyerName: buyer.name || "",
+    sellerName: customerDisplayName(seller),
+    buyerName: customerDisplayName(buyer),
+    sellerPhone: customerPhone(seller),
+    buyerPhone: customerPhone(buyer),
     itemName,
     sellerRate,
     sellerCommission,
