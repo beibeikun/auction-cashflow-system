@@ -297,6 +297,23 @@ textarea {
   align-items: center;
 }
 
+.company-logo-preview {
+  display: flex;
+  align-items: center;
+  min-height: 74px;
+  padding: 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.company-logo-preview img {
+  display: block;
+  max-width: 180px;
+  max-height: 64px;
+  object-fit: contain;
+}
+
 .entry-actions {
   margin-top: 12px;
 }
@@ -401,6 +418,10 @@ th {
 
 tr:hover td {
   background: #fff9ec;
+}
+
+tr.selected td {
+  background: #eef6f2;
 }
 
 .num {
@@ -876,20 +897,40 @@ tr:hover td {
 .slip-header {
   position: relative;
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1.2fr;
+  grid-template-columns: minmax(62mm, 1.35fr) minmax(36mm, 0.8fr) minmax(48mm, 1fr);
   align-items: start;
   gap: 12px;
+  min-height: 20mm;
 }
 
 .slip-company,
-.slip-event,
 .slip-meta,
 .slip-footer {
   font-size: 12px;
   line-height: 1.45;
 }
 
+.slip-company {
+  min-width: 0;
+  width: 36mm;
+  height: 16mm;
+  display: grid;
+  place-items: center;
+}
+
+.slip-logo {
+  display: block;
+  max-width: 34mm;
+  max-height: 14mm;
+  object-fit: contain;
+}
+
 .slip-title {
+  position: absolute;
+  top: 4mm;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
   text-align: center;
 }
 
@@ -908,46 +949,63 @@ tr:hover td {
   width: 120px;
 }
 
-.slip-event {
-  text-align: right;
-  font-weight: 700;
-  font-size: 15px;
-  line-height: 1.2;
-  margin-top: 16px;
-}
-
-.slip-customer {
-  display: flex;
-  justify-content: space-between;
-  align-items: end;
-  gap: 18px;
-  margin-top: 18px;
-}
-
 .slip-name {
+  display: inline-block;
   font-size: 22px;
   font-weight: 700;
   border-bottom: 2px solid #111;
-  min-width: 240px;
   padding-bottom: 3px;
+}
+
+.slip-customer-row {
+  display: grid;
+  grid-template-columns: 430px minmax(44mm, 70mm);
+  justify-content: space-between;
+  align-items: start;
+  gap: 18px;
+  margin-top: 8mm;
+}
+
+.slip-left-stack {
+  display: grid;
+  gap: 8mm;
 }
 
 .slip-meta {
   display: grid;
   gap: 5px;
+  justify-self: end;
+  min-width: 44mm;
+  max-width: 70mm;
   font-weight: 700;
   line-height: 1.2;
 }
 
-.slip-meta div:last-child {
+.slip-meta-event {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.slip-meta-date {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  margin-top: 4px;
+}
+
+.slip-meta-address {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 8px;
   font-size: 11px;
   font-weight: 500;
-  margin-top: 4px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .slip-summary {
   width: 430px;
-  margin-top: 18px;
 }
 
 .slip-summary table,

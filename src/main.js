@@ -41,7 +41,10 @@ createApp({
       showSettlementPreview: false,
       entrySaveError: "",
       quickItemName: "",
-      quickItemMessage: ""
+      quickItemMessage: "",
+      newSessionName: "",
+      sessionMessage: "",
+      companyProfileMessage: ""
     };
   },
   computed: {
@@ -55,6 +58,24 @@ createApp({
         ["settings", "场次设置", "⚙"],
         ["export", "完整明细", "⇩"]
       ];
+    },
+    sessions() {
+      return this.state?.sessions || [];
+    },
+    activeSession() {
+      return this.sessions.find((session) => session.id === this.state?.activeSessionId) || {};
+    },
+    companyProfile() {
+      return this.state?.companyProfile || this.blankCompanyProfile();
+    },
+    companyPostalLine() {
+      return this.companyProfile.postalCode ? `〒${this.companyProfile.postalCode}` : "";
+    },
+    companyAddressLines() {
+      return String(this.companyProfile.address || "")
+        .split(/\n+/)
+        .map((line) => line.trim())
+        .filter(Boolean);
     },
     lots() {
       return this.state ? this.state.lots.map((lot) => this.deriveLot(lot)) : [];
@@ -340,6 +361,14 @@ createApp({
     blankCustomerBook() {
       return { actualName: "", phone: "", address: "", antiqueLicenseNo: "" };
     },
+    blankCompanyProfile() {
+      return {
+        taxId: "",
+        postalCode: "",
+        address: "",
+        logoDataUrl: ""
+      };
+    },
     async api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -349,7 +378,12 @@ createApp({
       return response.json();
     },
     async load() {
+      const previousSessionId = this.state?.activeSessionId || "";
       this.state = await this.api("/api/state");
+      this.state.companyProfile = { ...this.blankCompanyProfile(), ...(this.state.companyProfile || {}) };
+      if (previousSessionId && previousSessionId !== this.state.activeSessionId) {
+        this.resetSessionUiState();
+      }
     },
     connectEvents() {
       const source = new EventSource("/api/events");
@@ -366,6 +400,49 @@ createApp({
     setTab(tab) {
       this.activeTab = tab;
       localStorage.setItem("auction.activeTab", tab);
+    },
+    resetSessionUiState() {
+      if (this.liveEntrySyncTimer) clearTimeout(this.liveEntrySyncTimer);
+      this.editingLotId = "";
+      this.editingCustomerId = "";
+      this.settlementCustomer = "";
+      this.settlementSellerScope = "all";
+      this.filterText = "";
+      this.dealPlateFilter = "";
+      this.selectedLots = new Set();
+      this.liveEntryDirty = false;
+      this.entrySaveError = "";
+      this.entry = {
+        ...this.blankEntry(),
+        itemNo: this.nextItemNo(),
+        sellerCode: "",
+        itemCode: ""
+      };
+    },
+    async createSession() {
+      this.sessionMessage = "";
+      const eventName = this.newSessionName.trim() || "现金拍卖会";
+      await this.api("/api/sessions", { method: "POST", body: JSON.stringify({ meta: { eventName } }) });
+      this.newSessionName = "";
+      await this.load();
+      this.resetSessionUiState();
+      this.sessionMessage = `已新建并切换到：${eventName}`;
+    },
+    async switchSession(id) {
+      if (!id || id === this.state?.activeSessionId) return;
+      await this.api(`/api/sessions/${encodeURIComponent(id)}/switch`, { method: "POST", body: JSON.stringify({}) });
+      await this.load();
+      this.resetSessionUiState();
+      this.sessionMessage = "已切换场次";
+    },
+    async deleteSession(id) {
+      const row = this.sessions.find((session) => session.id === id);
+      if (!row) return;
+      if (!confirm(`删除场次“${row.eventName || row.id}”？文件会移入 deleted-sessions 目录。`)) return;
+      const result = await this.api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await this.load();
+      this.resetSessionUiState();
+      this.sessionMessage = `已删除场次，文件已移入 ${result.deletedName}`;
     },
     changeSettlementCustomer(value) {
       this.settlementCustomer = value;
@@ -641,6 +718,38 @@ createApp({
     async saveMeta() {
       await this.api("/api/meta", { method: "POST", body: JSON.stringify(this.state.meta) });
       await this.load();
+    },
+    async saveCompanyProfile() {
+      this.companyProfileMessage = "";
+      try {
+        await this.api("/api/company-profile", { method: "POST", body: JSON.stringify(this.companyProfile) });
+      } catch (error) {
+        this.companyProfileMessage = String(error.message || error).includes("company_logo_invalid") ? "Logo 图片格式不正确，请重新选择图片" : String(error.message || error);
+        return;
+      }
+      this.companyProfileMessage = "公司资料已保存";
+      await this.load();
+    },
+    async companyLogoPicked(event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (!String(file.type || "").startsWith("image/")) {
+        this.companyProfileMessage = "请选择图片文件";
+        event.target.value = "";
+        return;
+      }
+      const logoDataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("logo_read_failed"));
+        reader.readAsDataURL(file);
+      });
+      this.state.companyProfile.logoDataUrl = logoDataUrl;
+      this.companyProfileMessage = "Logo 已选择，请点击保存公司资料";
+    },
+    removeCompanyLogo() {
+      this.state.companyProfile.logoDataUrl = "";
+      this.companyProfileMessage = "Logo 已移除，请点击保存公司资料";
     },
     async saveItemCodes() {
       await this.api("/api/codes/items", { method: "POST", body: JSON.stringify(this.parseCodeText(this.itemCodeText(), "name")) });
@@ -1198,7 +1307,53 @@ createApp({
         </section>
 
         <section v-else-if="activeTab === 'settings'" class="grid">
+          <section class="panel">
+            <div class="panel-head"><h2>拍卖场次管理</h2><div class="muted">当前：{{ activeSession.eventName || state.meta.eventName }}</div></div>
+            <div class="panel-body grid">
+              <form class="form-grid" @submit.prevent="createSession">
+                <div class="field full"><label>新建空白场次名称</label><input v-model="newSessionName" placeholder="例如 2026 春季现金拍卖会" /></div>
+                <div class="actions field full"><button class="primary" type="submit">新建并切换</button></div>
+              </form>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>场次名称</th><th>开拍</th><th class="num">拍品</th><th class="num">客户</th><th>更新时间</th><th class="no-print">操作</th></tr></thead>
+                  <tbody>
+                    <tr v-for="session in sessions" :key="session.id" :class="{ selected: session.id === state.activeSessionId }">
+                      <td><b>{{ session.eventName }}</b><div class="muted">{{ session.id.slice(0, 8) }}</div></td>
+                      <td>{{ session.startTime || "-" }}</td>
+                      <td class="num">{{ session.lotCount }}</td>
+                      <td class="num">{{ session.customerCount }}</td>
+                      <td>{{ formatTime(session.updatedAt) }}</td>
+                      <td class="no-print"><button :disabled="session.id === state.activeSessionId" @click="switchSession(session.id)">切换</button><button class="danger" @click="deleteSession(session.id)">删除</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="notice">每个场次独立保存为 data/sessions 下的 JSON 文件；永久客户簿在所有场次之间共享。</div>
+              <div v-if="sessionMessage" class="muted">{{ sessionMessage }}</div>
+            </div>
+          </section>
           <section class="panel"><div class="panel-head"><h2>场次设置</h2></div><div class="panel-body"><form class="form-grid" @submit.prevent="saveMeta"><div class="field full"><label>拍卖会名称</label><input v-model="state.meta.eventName" /></div><div class="field"><label>开拍时间</label><input v-model="state.meta.startTime" /></div><div class="field"><label>默认出货佣金</label><input v-model="state.meta.sellerCommissionRate" type="number" /></div><div class="field"><label>默认买货佣金</label><input v-model="state.meta.buyerCommissionRate" type="number" /></div><div class="field"><label>默认退货佣金</label><input v-model="state.meta.returnCommissionRate" type="number" /></div><div class="actions field full"><button class="primary" type="submit">保存设置</button></div></form></div></section>
+          <section class="panel">
+            <div class="panel-head"><h2>公司资料</h2><div class="muted">所有场次共用</div></div>
+            <div class="panel-body">
+              <form class="form-grid" @submit.prevent="saveCompanyProfile">
+                <div class="field"><label>税号</label><input v-model="state.companyProfile.taxId" /></div>
+                <div class="field"><label>邮编</label><input v-model="state.companyProfile.postalCode" /></div>
+                <div class="field full"><label>地址</label><textarea v-model="state.companyProfile.address"></textarea></div>
+                <div class="field"><label>公司 Logo</label><input type="file" accept="image/*" @change="companyLogoPicked" /></div>
+                <div class="company-logo-preview">
+                  <img v-if="state.companyProfile.logoDataUrl" :src="state.companyProfile.logoDataUrl" alt="公司 Logo 预览" />
+                  <div v-else class="muted">未设置 Logo</div>
+                </div>
+                <div class="actions field full">
+                  <button class="primary" type="submit">保存公司资料</button>
+                  <button type="button" @click="removeCompanyLogo" :disabled="!state.companyProfile.logoDataUrl">移除 Logo</button>
+                </div>
+                <div v-if="companyProfileMessage" class="muted field full">{{ companyProfileMessage }}</div>
+              </form>
+            </div>
+          </section>
           <section class="panel"><div class="panel-head"><h2>数据导入与清场</h2></div><div class="panel-body grid"><div class="form-grid"><div class="field"><label>导入 CSV</label><input type="file" accept=".csv,text/csv" @change="filePicked" /></div><label class="checkline"><input type="checkbox" v-model="csvCustomersOnly" /><span>只导入客户信息</span></label></div><div class="notice">CSV 表头可使用旧表字段：客户号牌、出货号牌、客户名称、拍品编号、货主出货号牌缩写、拍品名称缩写、拍品数量、买家客户号牌、千单位成交价。</div><div class="actions"><button class="primary" @click="importCsv">导入 CSV</button><button class="danger" @click="clearAuction">清空本场拍卖与客户数据</button></div><div class="muted">{{ importMessage }}</div></div></section>
           <section class="code-grid"><section class="panel"><div class="panel-head"><h2>拍品代码</h2></div><div class="panel-body field"><label>每行：缩写,名称</label><textarea id="item-code-text" :value="codeText(state.itemCodes, 'name')"></textarea><div class="actions"><button class="primary" @click="saveItemCodes">保存拍品代码</button></div></div></section><section class="panel"><div class="panel-head"><h2>出货号牌代码</h2></div><div class="panel-body field"><label>每行：英文缩写,日文号牌</label><textarea id="seller-code-text" :value="codeText(state.sellerCodes, 'label')"></textarea><div class="actions"><button class="primary" @click="saveSellerCodes">保存号牌代码</button></div></div></section></section>
         </section>
@@ -1216,38 +1371,41 @@ createApp({
           <article class="slip-page">
             <header class="slip-header">
               <div class="slip-company">
-                <div>〒603-8835 京都府京都市北区</div>
-                <div>大宮西総門口町42-1 古河ビル</div>
-                <div>TEL:075-468-1620</div>
+                <img v-if="companyProfile.logoDataUrl" class="slip-logo" :src="companyProfile.logoDataUrl" alt="Company logo" />
               </div>
               <div class="slip-title">
                 <h2>精算伝票</h2>
               </div>
-              <div class="slip-tax-id">T8130001051526</div>
-              <div class="slip-event">{{ state.meta.eventName }}</div>
+              <div class="slip-tax-id">{{ companyProfile.taxId }}</div>
             </header>
 
-            <section class="slip-customer">
-              <div class="slip-name">{{ settlementCustomerName }} 様</div>
+            <section class="slip-customer-row">
+              <div class="slip-left-stack">
+                <div class="slip-name">{{ settlementCustomerName }} 様</div>
+                <div class="slip-summary">
+                  <table>
+                    <thead>
+                      <tr><th></th><th colspan="2">買</th><th colspan="2">売</th></tr>
+                      <tr><th></th><th>税込</th><th>消費税</th><th>税込</th><th>消費税</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr><th>合計</th><td>{{ yen(settlementSummary.buyerTotal) }}</td><td>{{ yen(settlementSummary.buyerTax) }}</td><td>{{ yen(settlementSummary.sellerAmount) }}</td><td>{{ yen(settlementSummary.sellerTax) }}</td></tr>
+                      <tr><th>手数料</th><td>{{ yen(settlementSummary.buyerCommission) }}</td><td>{{ yen(settlementSummary.buyerTax) }}</td><td>{{ yen(settlementSummary.sellerCommission) }}</td><td>{{ yen(settlementSummary.sellerTax) }}</td></tr>
+                      <tr><th>正味</th><td colspan="2">{{ yen(settlementSummary.buyerTotal) }}</td><td colspan="2">{{ yen(settlementSummary.sellerNet) }}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
               <div class="slip-meta">
+                <div class="slip-meta-event">{{ state.meta.eventName }}</div>
+                <div class="slip-meta-address" v-if="companyPostalLine || companyAddressLines.length">
+                  <div v-if="companyPostalLine">{{ companyPostalLine }}</div>
+                  <div v-for="line in companyAddressLines" :key="line">{{ line }}</div>
+                </div>
                 <div>パドル番号: {{ settlementCurrent.bidderNo || "" }}</div>
                 <div>荷主コード: {{ settlementSellerLabelText }}</div>
-                <div>プリント日付： {{ new Date().toLocaleDateString("ja-JP") }}</div>
+                <div class="slip-meta-date">プリント日付： {{ new Date().toLocaleDateString("ja-JP") }}</div>
               </div>
-            </section>
-
-            <section class="slip-summary">
-              <table>
-                <thead>
-                  <tr><th></th><th colspan="2">買</th><th colspan="2">売</th></tr>
-                  <tr><th></th><th>税込</th><th>消費税</th><th>税込</th><th>消費税</th></tr>
-                </thead>
-                <tbody>
-                  <tr><th>合計</th><td>{{ yen(settlementSummary.buyerTotal) }}</td><td>{{ yen(settlementSummary.buyerTax) }}</td><td>{{ yen(settlementSummary.sellerAmount) }}</td><td>{{ yen(settlementSummary.sellerTax) }}</td></tr>
-                  <tr><th>手数料</th><td>{{ yen(settlementSummary.buyerCommission) }}</td><td>{{ yen(settlementSummary.buyerTax) }}</td><td>{{ yen(settlementSummary.sellerCommission) }}</td><td>{{ yen(settlementSummary.sellerTax) }}</td></tr>
-                  <tr><th>正味</th><td colspan="2">{{ yen(settlementSummary.buyerTotal) }}</td><td colspan="2">{{ yen(settlementSummary.sellerNet) }}</td></tr>
-                </tbody>
-              </table>
             </section>
 
             <footer class="slip-footer">

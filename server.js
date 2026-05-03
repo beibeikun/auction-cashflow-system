@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdir, stat, readdir, rename } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = join(__dirname, "dist");
 const publicDir = join(__dirname, "public");
 const dataDir = join(__dirname, "data");
+const sessionsDir = join(dataDir, "sessions");
+const deletedSessionsDir = join(dataDir, "deleted-sessions");
 const storePath = join(dataDir, "store.json");
 const port = Number(process.env.PORT || 4173);
 
@@ -23,68 +25,205 @@ const mime = {
 };
 
 const clients = new Set();
-let state = await loadStore();
+let { store, state, sessions } = await loadStore();
 let writeQueue = Promise.resolve();
 
-function defaultStore() {
+function defaultMeta() {
   return {
-    meta: {
-      eventName: "现金拍卖会",
-      startTime: "10:00",
-      sellerCommissionRate: 5,
-      buyerCommissionRate: 10,
-      returnCommissionRate: 5,
-      updatedAt: new Date().toISOString()
-    },
-    itemCodes: [
-      { code: "hn", name: "花鸟" },
-      { code: "ss", name: "山水" },
-      { code: "sf", name: "书法" }
-    ],
-    sellerCodes: [
-      { code: "a", label: "あ" },
-      { code: "i", label: "い" },
-      { code: "u", label: "う" }
-    ],
-    customers: [
-      { bidderNo: -1, sellerLabel: "", name: "流拍", actualSellerName: "", phone: "", sellerRate: "", buyerRate: "", returnRate: "" }
-    ],
-    customerBook: [],
-    lots: [],
-    liveEntry: {},
-    audit: []
+    eventName: "现金拍卖会",
+    startTime: "10:00",
+    sellerCommissionRate: 5,
+    buyerCommissionRate: 10,
+    returnCommissionRate: 5,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function defaultCompanyProfile() {
+  return {
+    taxId: "T8130001051526",
+    postalCode: "603-8835",
+    address: "京都府京都市北区\n大宮西総門口町42-1 古河ビル",
+    logoDataUrl: ""
+  };
+}
+
+function defaultCustomers() {
+  return [
+    { id: randomUUID(), bidderNo: -1, sellerLabel: "", name: "流拍", actualSellerName: "", phone: "", sellerRate: "", buyerRate: "", returnRate: "" }
+  ];
+}
+
+function defaultSession(input = {}) {
+  const now = new Date().toISOString();
+  return {
+    id: input.id || randomUUID(),
+    meta: { ...defaultMeta(), ...(input.meta || {}), updatedAt: input.meta?.updatedAt || now },
+    itemCodes: Array.isArray(input.itemCodes) ? input.itemCodes : [],
+    sellerCodes: Array.isArray(input.sellerCodes) ? input.sellerCodes : [],
+    customers: Array.isArray(input.customers) ? ensureNoBidCustomer(input.customers) : defaultCustomers(),
+    lots: Array.isArray(input.lots) ? input.lots : [],
+    liveEntry: input.liveEntry && typeof input.liveEntry === "object" ? input.liveEntry : {},
+    audit: Array.isArray(input.audit) ? input.audit.slice(-250) : [],
+    createdAt: input.createdAt || now,
+    updatedAt: input.updatedAt || input.meta?.updatedAt || now
+  };
+}
+
+function defaultGlobalStore(input = {}) {
+  const now = new Date().toISOString();
+  return {
+    version: 2,
+    activeSessionId: input.activeSessionId || "",
+    customerBook: Array.isArray(input.customerBook) ? input.customerBook : [],
+    companyProfile: cleanCompanyProfile(input.companyProfile || {}),
+    updatedAt: input.updatedAt || now
+  };
+}
+
+function ensureNoBidCustomer(customers) {
+  const rows = Array.isArray(customers) ? customers : [];
+  if (rows.some((customer) => Number(customer.bidderNo) === -1)) return rows;
+  return [...defaultCustomers(), ...rows];
+}
+
+function sessionPath(id) {
+  return join(sessionsDir, `${id}.json`);
+}
+
+async function readJsonFile(path) {
+  return JSON.parse(await readFile(path, "utf8"));
+}
+
+async function writeJsonFile(path, payload) {
+  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+async function readSessionFiles() {
+  await mkdir(sessionsDir, { recursive: true });
+  const names = await readdir(sessionsDir).catch(() => []);
+  const rows = [];
+  for (const name of names.filter((item) => item.endsWith(".json")).sort()) {
+    try {
+      const raw = await readJsonFile(join(sessionsDir, name));
+      rows.push(defaultSession({ ...raw, id: raw.id || name.replace(/\.json$/u, "") }));
+    } catch (error) {
+      console.error(`跳过无法读取的场次文件 ${name}:`, error.message);
+    }
+  }
+  return rows;
+}
+
+function isLegacyStore(raw) {
+  return raw && typeof raw === "object" && (raw.meta || raw.lots || raw.customers || raw.itemCodes || raw.sellerCodes) && !raw.version && !raw.activeSessionId;
+}
+
+function summarizeSession(session) {
+  return {
+    id: session.id,
+    eventName: session.meta?.eventName || "现金拍卖会",
+    startTime: session.meta?.startTime || "",
+    updatedAt: session.meta?.updatedAt || session.updatedAt || "",
+    lotCount: Array.isArray(session.lots) ? session.lots.length : 0,
+    customerCount: Array.isArray(session.customers) ? session.customers.filter((row) => Number(row.bidderNo) !== -1).length : 0
+  };
+}
+
+function sessionSummaries() {
+  return sessions
+    .map(summarizeSession)
+    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+}
+
+function statePayload() {
+  return {
+    ...state,
+    customerBook: store.customerBook,
+    companyProfile: store.companyProfile,
+    sessions: sessionSummaries(),
+    activeSessionId: store.activeSessionId
   };
 }
 
 async function loadStore() {
   await mkdir(dataDir, { recursive: true });
+  await mkdir(sessionsDir, { recursive: true });
+  await mkdir(deletedSessionsDir, { recursive: true });
+
+  let raw = {};
   try {
-    const text = await readFile(storePath, "utf8");
-    return normalizeStore(JSON.parse(text));
+    raw = await readJsonFile(storePath);
   } catch {
-    const fresh = defaultStore();
-    await writeFile(storePath, JSON.stringify(fresh, null, 2));
-    return fresh;
+    raw = {};
   }
+
+  let loadedSessions = await readSessionFiles();
+  let globalStore;
+
+  if (isLegacyStore(raw)) {
+    const legacySession = defaultSession(raw);
+    if (!loadedSessions.some((session) => session.id === legacySession.id)) {
+      await writeJsonFile(sessionPath(legacySession.id), legacySession);
+      loadedSessions.push(legacySession);
+    }
+    globalStore = defaultGlobalStore({
+      activeSessionId: legacySession.id,
+      customerBook: Array.isArray(raw.customerBook) ? raw.customerBook : [],
+      companyProfile: raw.companyProfile || {},
+      updatedAt: new Date().toISOString()
+    });
+    await writeJsonFile(storePath, globalStore);
+  } else {
+    globalStore = defaultGlobalStore(raw);
+  }
+
+  if (!loadedSessions.length) {
+    const fresh = defaultSession();
+    loadedSessions.push(fresh);
+    globalStore.activeSessionId = fresh.id;
+    await writeJsonFile(sessionPath(fresh.id), fresh);
+  }
+
+  if (!loadedSessions.some((session) => session.id === globalStore.activeSessionId)) {
+    globalStore.activeSessionId = sessionSummariesFrom(loadedSessions)[0]?.id || loadedSessions[0].id;
+    await writeJsonFile(storePath, globalStore);
+  }
+
+  const activeSession = loadedSessions.find((session) => session.id === globalStore.activeSessionId) || loadedSessions[0];
+  return { store: globalStore, state: activeSession, sessions: loadedSessions };
 }
 
-function normalizeStore(raw) {
-  const fresh = defaultStore();
-  return {
-    meta: { ...fresh.meta, ...(raw.meta || {}) },
-    itemCodes: Array.isArray(raw.itemCodes) ? raw.itemCodes : fresh.itemCodes,
-    sellerCodes: Array.isArray(raw.sellerCodes) ? raw.sellerCodes : fresh.sellerCodes,
-    customers: Array.isArray(raw.customers) ? raw.customers : fresh.customers,
-    customerBook: Array.isArray(raw.customerBook) ? raw.customerBook : fresh.customerBook,
-    lots: Array.isArray(raw.lots) ? raw.lots : [],
-    liveEntry: raw.liveEntry && typeof raw.liveEntry === "object" ? raw.liveEntry : {},
-    audit: Array.isArray(raw.audit) ? raw.audit.slice(-250) : []
-  };
+function sessionSummariesFrom(rows) {
+  return rows
+    .map(summarizeSession)
+    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
 
-function persist() {
-  state.meta.updatedAt = new Date().toISOString();
-  writeQueue = writeQueue.then(() => writeFile(storePath, JSON.stringify(state, null, 2)));
+function persistGlobal() {
+  store.updatedAt = new Date().toISOString();
+  writeQueue = writeQueue.then(() => writeJsonFile(storePath, store));
+  return writeQueue;
+}
+
+function persistSession() {
+  const now = new Date().toISOString();
+  state.meta.updatedAt = now;
+  state.updatedAt = now;
+  sessions = sessions.map((session) => (session.id === state.id ? state : session));
+  writeQueue = writeQueue.then(() => writeJsonFile(sessionPath(state.id), state));
+  return writeQueue;
+}
+
+function persistAll() {
+  const now = new Date().toISOString();
+  state.meta.updatedAt = now;
+  state.updatedAt = now;
+  store.updatedAt = now;
+  sessions = sessions.map((session) => (session.id === state.id ? state : session));
+  writeQueue = writeQueue.then(async () => {
+    await writeJsonFile(storePath, store);
+    await writeJsonFile(sessionPath(state.id), state);
+  });
   return writeQueue;
 }
 
@@ -118,6 +257,30 @@ function toNumber(value, fallback = 0) {
   if (value === "" || value === null || value === undefined) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isImageDataUrl(value) {
+  return /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/]+=*$/iu.test(String(value || ""));
+}
+
+function cleanCompanyProfile(input = {}, options = {}) {
+  const defaults = defaultCompanyProfile();
+  const logoDataUrl = String(input.logoDataUrl ?? defaults.logoDataUrl).trim();
+  if (logoDataUrl && !isImageDataUrl(logoDataUrl)) {
+    if (options.rejectInvalidLogo) return { error: "company_logo_invalid" };
+    return {
+      taxId: String(input.taxId ?? defaults.taxId).trim(),
+      postalCode: String(input.postalCode ?? defaults.postalCode).trim(),
+      address: String(input.address ?? defaults.address).trim(),
+      logoDataUrl: ""
+    };
+  }
+  return {
+    taxId: String(input.taxId ?? defaults.taxId).trim(),
+    postalCode: String(input.postalCode ?? defaults.postalCode).trim(),
+    address: String(input.address ?? defaults.address).trim(),
+    logoDataUrl
+  };
 }
 
 function cleanLot(input, existing = {}) {
@@ -168,7 +331,7 @@ function cleanCustomerBook(input, existing = {}) {
 }
 
 function customerBookById(id) {
-  return state.customerBook.find((row) => String(row.id) === String(id));
+  return store.customerBook.find((row) => String(row.id) === String(id));
 }
 
 function customerDisplayName(customer = {}) {
@@ -190,7 +353,7 @@ function prepareCustomerRegistration(input, existing = {}) {
   if (wantsNewBook) {
     book = cleanCustomerBook(input);
     if (!book.actualName) return { error: "customer_book_name_required" };
-    state.customerBook.push(book);
+    store.customerBook.push(book);
     customerBookId = book.id;
   }
 
@@ -214,7 +377,7 @@ function prepareCustomerRegistration(input, existing = {}) {
     },
     existing
   );
-  return { customer, book };
+  return { customer, bookCreated: wantsNewBook };
 }
 
 function cleanLiveEntry(input) {
@@ -314,9 +477,7 @@ function upsertCustomersFromCsv(rows) {
     else state.customers.push(cleaned);
     count += 1;
   }
-  if (!state.customers.some((customer) => Number(customer.bidderNo) === -1)) {
-    state.customers.unshift({ id: randomUUID(), bidderNo: -1, sellerLabel: "", name: "流拍", actualSellerName: "", phone: "", sellerRate: "", buyerRate: "", returnRate: "" });
-  }
+  state.customers = ensureNoBidCustomer(state.customers);
   return count;
 }
 
@@ -359,19 +520,137 @@ function appendLotsFromCsv(rows) {
   return count;
 }
 
+function findSession(id) {
+  return sessions.find((session) => String(session.id) === String(id));
+}
+
+function cleanSessionMeta(input) {
+  const allowed = ["eventName", "startTime", "sellerCommissionRate", "buyerCommissionRate", "returnCommissionRate"];
+  return Object.fromEntries(allowed.filter((key) => input[key] !== undefined).map((key) => [key, input[key]]));
+}
+
+async function createBlankSession(input = {}) {
+  const session = defaultSession({ meta: cleanSessionMeta(input.meta || input) });
+  session.audit.push({ id: randomUUID(), at: new Date().toISOString(), action: "新建场次", detail: session.meta.eventName });
+  sessions.push(session);
+  state = session;
+  store.activeSessionId = session.id;
+  await persistAll();
+  return session;
+}
+
+async function switchSession(id) {
+  const next = findSession(id);
+  if (!next) return null;
+  state = next;
+  state.liveEntry = {};
+  store.activeSessionId = next.id;
+  store.updatedAt = new Date().toISOString();
+  writeQueue = writeQueue.then(async () => {
+    await writeJsonFile(storePath, store);
+    await writeJsonFile(sessionPath(state.id), state);
+  });
+  await writeQueue;
+  return state;
+}
+
+async function deleteSession(id) {
+  const target = findSession(id);
+  if (!target) return null;
+  await mkdir(deletedSessionsDir, { recursive: true });
+  const deletedName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${target.id}.json`;
+  await rename(sessionPath(target.id), join(deletedSessionsDir, deletedName));
+  sessions = sessions.filter((session) => session.id !== target.id);
+  if (!sessions.length) {
+    const fresh = defaultSession();
+    fresh.audit.push({ id: randomUUID(), at: new Date().toISOString(), action: "自动新建场次", detail: "删除最后一个场次后创建" });
+    sessions.push(fresh);
+    state = fresh;
+    store.activeSessionId = fresh.id;
+    await persistAll();
+  } else if (store.activeSessionId === target.id) {
+    const nextId = sessionSummariesFrom(sessions)[0].id;
+    state = findSession(nextId);
+    state.liveEntry = {};
+    store.activeSessionId = state.id;
+    store.updatedAt = new Date().toISOString();
+    writeQueue = writeQueue.then(async () => {
+      await writeJsonFile(storePath, store);
+      await writeJsonFile(sessionPath(state.id), state);
+    });
+    await writeQueue;
+  }
+  return { deleted: target, deletedName };
+}
+
 async function routeApi(req, res, pathname) {
   if (req.method === "GET" && pathname === "/api/state") {
-    sendJson(res, 200, state);
+    sendJson(res, 200, statePayload());
     return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/sessions") {
+    sendJson(res, 200, { sessions: sessionSummaries(), activeSessionId: store.activeSessionId });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/sessions") {
+    const session = await createBlankSession(await readJson(req));
+    broadcast();
+    sendJson(res, 201, statePayload());
+    return;
+  }
+
+  if (pathname.startsWith("/api/sessions/")) {
+    const parts = pathname.split("/");
+    const id = decodeURIComponent(parts[3] || "");
+    if (req.method === "POST" && parts[4] === "switch") {
+      const switched = await switchSession(id);
+      if (!switched) return sendJson(res, 404, { error: "session_not_found" });
+      broadcast();
+      sendJson(res, 200, statePayload());
+      return;
+    }
+    if (req.method === "PUT" && parts.length === 4) {
+      const target = findSession(id);
+      if (!target) return sendJson(res, 404, { error: "session_not_found" });
+      const input = await readJson(req);
+      target.meta = { ...target.meta, ...cleanSessionMeta(input.meta || input) };
+      target.meta.updatedAt = new Date().toISOString();
+      target.updatedAt = target.meta.updatedAt;
+      if (target.id === state.id) state = target;
+      writeQueue = writeQueue.then(() => writeJsonFile(sessionPath(target.id), target));
+      await writeQueue;
+      broadcast();
+      sendJson(res, 200, target.id === state.id ? statePayload() : summarizeSession(target));
+      return;
+    }
+    if (req.method === "DELETE" && parts.length === 4) {
+      const deleted = await deleteSession(id);
+      if (!deleted) return sendJson(res, 404, { error: "session_not_found" });
+      broadcast();
+      sendJson(res, 200, { ok: true, deletedSessionId: id, activeSessionId: store.activeSessionId, deletedName: deleted.deletedName });
+      return;
+    }
   }
 
   if (req.method === "POST" && pathname === "/api/meta") {
     const input = await readJson(req);
-    state.meta = { ...state.meta, ...input };
+    state.meta = { ...state.meta, ...cleanSessionMeta(input) };
     addAudit("更新场次设置", state.meta.eventName);
-    await persist();
+    await persistSession();
     broadcast();
-    sendJson(res, 200, state);
+    sendJson(res, 200, statePayload());
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/company-profile") {
+    const cleaned = cleanCompanyProfile(await readJson(req), { rejectInvalidLogo: true });
+    if (cleaned.error) return sendJson(res, 400, { error: cleaned.error });
+    store.companyProfile = cleaned;
+    await persistGlobal();
+    broadcast();
+    sendJson(res, 200, statePayload());
     return;
   }
 
@@ -381,7 +660,7 @@ async function routeApi(req, res, pathname) {
     state.lots.push(lot);
     state.liveEntry = {};
     addAudit("新增成交", `${lot.itemNo || ""} ${lot.sellerCode}/${lot.itemCode}`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 201, lot);
     return;
@@ -413,7 +692,7 @@ async function routeApi(req, res, pathname) {
       });
     }
     addAudit("批量操作成交", `${input.action} ${count} 条`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, { ok: true, count });
     return;
@@ -426,7 +705,7 @@ async function routeApi(req, res, pathname) {
     const input = await readJson(req);
     state.lots[index] = cleanLot(input, state.lots[index]);
     addAudit("更新成交", `${state.lots[index].itemNo || ""}`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, state.lots[index]);
     return;
@@ -438,7 +717,7 @@ async function routeApi(req, res, pathname) {
     state.lots = state.lots.filter((lot) => lot.id !== id);
     if (state.lots.length === before) return sendJson(res, 404, { error: "lot_not_found" });
     addAudit("删除成交", id);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, { ok: true });
     return;
@@ -446,14 +725,14 @@ async function routeApi(req, res, pathname) {
 
   if (req.method === "POST" && pathname === "/api/customer-book") {
     const input = await readJson(req);
-    const index = state.customerBook.findIndex((row) => String(row.id) === String(input.id));
-    const existing = index >= 0 ? state.customerBook[index] : {};
+    const index = store.customerBook.findIndex((row) => String(row.id) === String(input.id));
+    const existing = index >= 0 ? store.customerBook[index] : {};
     const book = cleanCustomerBook(input, existing);
     if (!book.actualName) return sendJson(res, 400, { error: "customer_book_name_required" });
-    if (index >= 0) state.customerBook[index] = book;
-    else state.customerBook.push(book);
+    if (index >= 0) store.customerBook[index] = book;
+    else store.customerBook.push(book);
     addAudit(index >= 0 ? "更新客户簿" : "新增客户簿", book.actualName);
-    await persist();
+    await persistAll();
     broadcast();
     sendJson(res, 200, book);
     return;
@@ -461,14 +740,14 @@ async function routeApi(req, res, pathname) {
 
   if (req.method === "DELETE" && pathname.startsWith("/api/customer-book/")) {
     const id = decodeURIComponent(pathname.split("/").pop());
-    if (state.customers.some((row) => String(row.customerBookId || "") === id)) {
+    if (sessions.some((session) => session.customers.some((row) => String(row.customerBookId || "") === id))) {
       return sendJson(res, 400, { error: "customer_book_in_use" });
     }
-    const before = state.customerBook.length;
-    state.customerBook = state.customerBook.filter((row) => String(row.id) !== id);
-    if (state.customerBook.length === before) return sendJson(res, 404, { error: "customer_book_not_found" });
+    const before = store.customerBook.length;
+    store.customerBook = store.customerBook.filter((row) => String(row.id) !== id);
+    if (store.customerBook.length === before) return sendJson(res, 404, { error: "customer_book_not_found" });
     addAudit("删除客户簿", id);
-    await persist();
+    await persistAll();
     broadcast();
     sendJson(res, 200, { ok: true });
     return;
@@ -484,7 +763,7 @@ async function routeApi(req, res, pathname) {
     if (index >= 0) state.customers[index] = customer;
     else state.customers.push(customer);
     addAudit(index >= 0 ? "更新客户" : "新增客户", `${customer.bidderNo} ${customerDisplayName(customer)}`);
-    await persist();
+    await (prepared.bookCreated ? persistAll() : persistSession());
     broadcast();
     sendJson(res, 200, customer);
     return;
@@ -496,7 +775,7 @@ async function routeApi(req, res, pathname) {
     state.customers = state.customers.filter((row) => String(row.id) !== id);
     if (state.customers.length === before) return sendJson(res, 404, { error: "customer_not_found" });
     addAudit("删除客户", id);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, { ok: true });
     return;
@@ -505,7 +784,7 @@ async function routeApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/codes/items") {
     mergeCodes("items", await readJson(req));
     addAudit("更新拍品代码", `${state.itemCodes.length} 条`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, state.itemCodes);
     return;
@@ -514,7 +793,7 @@ async function routeApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/codes/sellers") {
     mergeCodes("sellers", await readJson(req));
     addAudit("更新出货号牌代码", `${state.sellerCodes.length} 条`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, state.sellerCodes);
     return;
@@ -526,7 +805,7 @@ async function routeApi(req, res, pathname) {
     const customers = upsertCustomersFromCsv(rows);
     const lots = input.onlyCustomers ? 0 : appendLotsFromCsv(rows);
     addAudit("导入 CSV", `客户 ${customers} 条，成交 ${lots} 条`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, { ok: true, customers, lots });
     return;
@@ -536,9 +815,9 @@ async function routeApi(req, res, pathname) {
     const count = state.lots.length;
     const customers = state.customers.filter((row) => Number(row.bidderNo) !== -1).length;
     state.lots = [];
-    state.customers = defaultStore().customers;
+    state.customers = defaultCustomers();
     addAudit("清空本场拍卖数据", `${count} 条成交，${customers} 条客户`);
-    await persist();
+    await persistSession();
     broadcast();
     sendJson(res, 200, { ok: true, count, customers });
     return;

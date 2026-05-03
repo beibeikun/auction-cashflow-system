@@ -13,6 +13,7 @@ from xml.etree import ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKBOOK = ROOT.parent / "docs" / "现金会v3.0.xlsx"
 STORE = ROOT / "data" / "store.json"
+SESSIONS_DIR = ROOT / "data" / "sessions"
 NS = {
     "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -199,6 +200,7 @@ def import_with_xml(path: Path) -> dict:
         )
 
     return {
+        "id": "",
         "meta": {
             "eventName": str(cell(settings, 2, 1) or "现金拍卖会"),
             "sellerCommissionRate": as_number(cell(settings, 2, 2)) or 5,
@@ -210,9 +212,9 @@ def import_with_xml(path: Path) -> dict:
         },
         "itemCodes": item_codes,
         "sellerCodes": seller_codes,
-        "customerBook": [],
         "customers": customers,
         "lots": lots,
+        "liveEntry": {},
         "audit": [
             {
                 "id": str(uuid.uuid4()),
@@ -224,17 +226,52 @@ def import_with_xml(path: Path) -> dict:
     }
 
 
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def default_global_store(active_session_id: str = "", customer_book=None) -> dict:
+    return {
+        "version": 2,
+        "activeSessionId": active_session_id,
+        "customerBook": customer_book or [],
+        "updatedAt": datetime.now().isoformat(),
+    }
+
+
+def ensure_active_session() -> tuple[dict, str]:
+    ROOT.joinpath("data").mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    raw_store = read_json(STORE, {})
+    if raw_store.get("version") == 2:
+        store = default_global_store(raw_store.get("activeSessionId", ""), raw_store.get("customerBook", []))
+    else:
+        store = default_global_store("", raw_store.get("customerBook", []) if isinstance(raw_store, dict) else [])
+
+    session_id = store.get("activeSessionId") or str(uuid.uuid4())
+    store["activeSessionId"] = session_id
+    return store, session_id
+
+
 def main() -> int:
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_WORKBOOK
     if not path.exists():
         print(f"Workbook not found: {path}", file=sys.stderr)
         return 1
 
-    store = import_with_xml(path)
+    store, session_id = ensure_active_session()
+    session = import_with_xml(path)
+    session["id"] = session_id
+    session["createdAt"] = datetime.now().isoformat()
+    session["updatedAt"] = session["meta"]["updatedAt"]
 
-    STORE.parent.mkdir(parents=True, exist_ok=True)
     STORE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Imported {len(store['customers'])} customers, {len(store['lots'])} lots -> {STORE}")
+    session_path = SESSIONS_DIR / f"{session_id}.json"
+    session_path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Imported {len(session['customers'])} customers, {len(session['lots'])} lots -> {session_path}")
     return 0
 
 
