@@ -59,6 +59,8 @@ function defaultSession(input = {}) {
   return {
     id: input.id || randomUUID(),
     meta: { ...defaultMeta(), ...(input.meta || {}), updatedAt: input.meta?.updatedAt || now },
+    // Kept for compatibility with older session JSON files. The app now serves
+    // and saves code tables from the global store so they are shared by sessions.
     itemCodes: Array.isArray(input.itemCodes) ? input.itemCodes : [],
     sellerCodes: Array.isArray(input.sellerCodes) ? input.sellerCodes : [],
     customers: Array.isArray(input.customers) ? ensureNoBidCustomer(input.customers) : defaultCustomers(),
@@ -76,6 +78,8 @@ function defaultGlobalStore(input = {}) {
     version: 2,
     activeSessionId: input.activeSessionId || "",
     customerBook: Array.isArray(input.customerBook) ? input.customerBook : [],
+    itemCodes: normalizeCodeRows("items", input.itemCodes || []),
+    sellerCodes: normalizeCodeRows("sellers", input.sellerCodes || []),
     companyProfile: cleanCompanyProfile(input.companyProfile || {}),
     updatedAt: input.updatedAt || now
   };
@@ -129,6 +133,58 @@ function summarizeSession(session) {
   };
 }
 
+function normalizeCodeRows(kind, rows = []) {
+  const valueKey = kind === "items" ? "name" : "label";
+  const seen = new Set();
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => {
+      const code = String(row.code || "").trim().toLowerCase();
+      const primary = String(row[valueKey] || "").trim();
+      const fallback = String(kind === "items" ? row.label || "" : row.name || "").trim();
+      return { code, [valueKey]: primary || fallback };
+    })
+    .filter((row) => {
+      if (!row.code || seen.has(row.code)) return false;
+      seen.add(row.code);
+      return true;
+    });
+}
+
+function mergeCodeSources(kind, sources) {
+  const valueKey = kind === "items" ? "name" : "label";
+  const merged = new Map();
+  for (const source of sources) {
+    for (const row of normalizeCodeRows(kind, source)) {
+      const existing = merged.get(row.code);
+      if (!existing) merged.set(row.code, row);
+      else if (!existing[valueKey] && row[valueKey]) merged.set(row.code, row);
+    }
+  }
+  return [...merged.values()];
+}
+
+function sessionsByCodePriority(rows, activeSessionId) {
+  return [
+    ...rows.filter((session) => session.id === activeSessionId),
+    ...rows
+      .filter((session) => session.id !== activeSessionId)
+      .sort((a, b) => new Date(b.meta?.updatedAt || b.updatedAt || 0) - new Date(a.meta?.updatedAt || a.updatedAt || 0))
+  ];
+}
+
+function migrateSharedCodes(globalStore, loadedSessions) {
+  const prioritizedSessions = sessionsByCodePriority(loadedSessions, globalStore.activeSessionId);
+  globalStore.itemCodes = mergeCodeSources("items", [globalStore.itemCodes, ...prioritizedSessions.map((session) => session.itemCodes)]);
+  globalStore.sellerCodes = mergeCodeSources("sellers", [globalStore.sellerCodes, ...prioritizedSessions.map((session) => session.sellerCodes)]);
+}
+
+function applySharedCodesToSessions(rows = sessions) {
+  for (const session of rows) {
+    session.itemCodes = store.itemCodes;
+    session.sellerCodes = store.sellerCodes;
+  }
+}
+
 function sessionSummaries() {
   return sessions
     .map(summarizeSession)
@@ -138,6 +194,8 @@ function sessionSummaries() {
 function statePayload() {
   return {
     ...state,
+    itemCodes: store.itemCodes,
+    sellerCodes: store.sellerCodes,
     customerBook: store.customerBook,
     companyProfile: store.companyProfile,
     sessions: sessionSummaries(),
@@ -177,6 +235,8 @@ async function loadStore() {
     globalStore = defaultGlobalStore(raw);
   }
 
+  migrateSharedCodes(globalStore, loadedSessions);
+
   if (!loadedSessions.length) {
     const fresh = defaultSession();
     loadedSessions.push(fresh);
@@ -189,7 +249,14 @@ async function loadStore() {
     await writeJsonFile(storePath, globalStore);
   }
 
+  for (const session of loadedSessions) {
+    session.itemCodes = globalStore.itemCodes;
+    session.sellerCodes = globalStore.sellerCodes;
+  }
+
   const activeSession = loadedSessions.find((session) => session.id === globalStore.activeSessionId) || loadedSessions[0];
+  await writeJsonFile(storePath, globalStore);
+  await Promise.all(loadedSessions.map((session) => writeJsonFile(sessionPath(session.id), session)));
   return { store: globalStore, state: activeSession, sessions: loadedSessions };
 }
 
@@ -223,6 +290,20 @@ function persistAll() {
   writeQueue = writeQueue.then(async () => {
     await writeJsonFile(storePath, store);
     await writeJsonFile(sessionPath(state.id), state);
+  });
+  return writeQueue;
+}
+
+function persistSharedCodes() {
+  const now = new Date().toISOString();
+  state.meta.updatedAt = now;
+  state.updatedAt = now;
+  store.updatedAt = now;
+  sessions = sessions.map((session) => (session.id === state.id ? state : session));
+  applySharedCodesToSessions();
+  writeQueue = writeQueue.then(async () => {
+    await writeJsonFile(storePath, store);
+    await Promise.all(sessions.map((session) => writeJsonFile(sessionPath(session.id), session)));
   });
   return writeQueue;
 }
@@ -390,17 +471,10 @@ function cleanLiveEntry(input) {
 }
 
 function mergeCodes(kind, rows) {
-  const cleaned = rows
-    .map((row) => ({
-      code: String(row.code || "").trim().toLowerCase(),
-      name: String(row.name || row.label || "").trim(),
-      label: String(row.label || row.name || "").trim()
-    }))
-    .filter((row) => row.code);
   if (kind === "items") {
-    state.itemCodes = cleaned.map(({ code, name, label }) => ({ code, name: name || label }));
+    store.itemCodes = normalizeCodeRows("items", rows);
   } else {
-    state.sellerCodes = cleaned.map(({ code, label, name }) => ({ code, label: label || name }));
+    store.sellerCodes = normalizeCodeRows("sellers", rows);
   }
 }
 
@@ -482,12 +556,12 @@ function upsertCustomersFromCsv(rows) {
 }
 
 function codeFromLabel(label) {
-  return state.sellerCodes.find((row) => row.label === label)?.code || String(label || "").trim().toLowerCase();
+  return store.sellerCodes.find((row) => row.label === label)?.code || String(label || "").trim().toLowerCase();
 }
 
 function codeFromItemName(name) {
   const text = String(name || "").replace(/\s+(山売|\d+件)$/u, "").trim();
-  return state.itemCodes.find((row) => row.name === text)?.code || String(name || "").trim().toLowerCase();
+  return store.itemCodes.find((row) => row.name === text)?.code || String(name || "").trim().toLowerCase();
 }
 
 function appendLotsFromCsv(rows) {
@@ -783,19 +857,19 @@ async function routeApi(req, res, pathname) {
 
   if (req.method === "POST" && pathname === "/api/codes/items") {
     mergeCodes("items", await readJson(req));
-    addAudit("更新拍品代码", `${state.itemCodes.length} 条`);
-    await persistSession();
+    addAudit("更新拍品代码", `${store.itemCodes.length} 条`);
+    await persistSharedCodes();
     broadcast();
-    sendJson(res, 200, state.itemCodes);
+    sendJson(res, 200, store.itemCodes);
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/codes/sellers") {
     mergeCodes("sellers", await readJson(req));
-    addAudit("更新出货号牌代码", `${state.sellerCodes.length} 条`);
-    await persistSession();
+    addAudit("更新出货号牌代码", `${store.sellerCodes.length} 条`);
+    await persistSharedCodes();
     broadcast();
-    sendJson(res, 200, state.sellerCodes);
+    sendJson(res, 200, store.sellerCodes);
     return;
   }
 
@@ -837,11 +911,11 @@ async function routeApi(req, res, pathname) {
 }
 
 function derive(lot) {
-  const sellerCode = state.sellerCodes.find((row) => row.code === lot.sellerCode);
+  const sellerCode = store.sellerCodes.find((row) => row.code === lot.sellerCode);
   const sellerLabel = sellerCode?.label || "";
   const seller = state.customers.find((row) => row.sellerLabel === sellerLabel) || {};
   const buyer = state.customers.find((row) => Number(row.bidderNo) === Number(lot.buyerNo)) || {};
-  const item = state.itemCodes.find((row) => row.code === lot.itemCode);
+  const item = store.itemCodes.find((row) => row.code === lot.itemCode);
   const amount = toNumber(lot.priceK, 0) * 1000;
   const isPending = lot.buyerNo === "";
   const isReturn = seller.bidderNo !== undefined && Number(seller.bidderNo) === Number(lot.buyerNo);

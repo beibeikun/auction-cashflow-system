@@ -233,11 +233,20 @@ def read_json(path: Path, default):
         return default
 
 
-def default_global_store(active_session_id: str = "", customer_book=None) -> dict:
+def default_global_store(
+    active_session_id: str = "",
+    customer_book=None,
+    item_codes=None,
+    seller_codes=None,
+    company_profile=None,
+) -> dict:
     return {
         "version": 2,
         "activeSessionId": active_session_id,
         "customerBook": customer_book or [],
+        "itemCodes": item_codes or [],
+        "sellerCodes": seller_codes or [],
+        "companyProfile": company_profile or {},
         "updatedAt": datetime.now().isoformat(),
     }
 
@@ -247,9 +256,21 @@ def ensure_active_session() -> tuple[dict, str]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     raw_store = read_json(STORE, {})
     if raw_store.get("version") == 2:
-        store = default_global_store(raw_store.get("activeSessionId", ""), raw_store.get("customerBook", []))
+        store = default_global_store(
+            raw_store.get("activeSessionId", ""),
+            raw_store.get("customerBook", []),
+            raw_store.get("itemCodes", []),
+            raw_store.get("sellerCodes", []),
+            raw_store.get("companyProfile", {}),
+        )
     else:
-        store = default_global_store("", raw_store.get("customerBook", []) if isinstance(raw_store, dict) else [])
+        store = default_global_store(
+            "",
+            raw_store.get("customerBook", []) if isinstance(raw_store, dict) else [],
+            raw_store.get("itemCodes", []) if isinstance(raw_store, dict) else [],
+            raw_store.get("sellerCodes", []) if isinstance(raw_store, dict) else [],
+            raw_store.get("companyProfile", {}) if isinstance(raw_store, dict) else {},
+        )
 
     session_id = store.get("activeSessionId") or str(uuid.uuid4())
     store["activeSessionId"] = session_id
@@ -267,6 +288,9 @@ def main() -> int:
     session["id"] = session_id
     session["createdAt"] = datetime.now().isoformat()
     session["updatedAt"] = session["meta"]["updatedAt"]
+    store["itemCodes"] = session["itemCodes"]
+    store["sellerCodes"] = session["sellerCodes"]
+    store["updatedAt"] = datetime.now().isoformat()
 
     STORE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
     session_path = SESSIONS_DIR / f"{session_id}.json"

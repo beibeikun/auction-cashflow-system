@@ -42,6 +42,8 @@ createApp({
       entrySaveError: "",
       quickItemName: "",
       quickItemMessage: "",
+      itemCodeDraft: "",
+      sellerCodeDraft: "",
       newSessionName: "",
       sessionMessage: "",
       companyProfileMessage: ""
@@ -381,6 +383,7 @@ createApp({
       const previousSessionId = this.state?.activeSessionId || "";
       this.state = await this.api("/api/state");
       this.state.companyProfile = { ...this.blankCompanyProfile(), ...(this.state.companyProfile || {}) };
+      this.syncCodeDrafts();
       if (previousSessionId && previousSessionId !== this.state.activeSessionId) {
         this.resetSessionUiState();
       }
@@ -759,11 +762,15 @@ createApp({
       await this.api("/api/codes/sellers", { method: "POST", body: JSON.stringify(this.parseCodeText(this.sellerCodeText(), "label")) });
       await this.load();
     },
+    syncCodeDrafts() {
+      this.itemCodeDraft = this.codeText(this.state?.itemCodes || [], "name");
+      this.sellerCodeDraft = this.codeText(this.state?.sellerCodes || [], "label");
+    },
     itemCodeText() {
-      return document.querySelector("#item-code-text")?.value || "";
+      return this.itemCodeDraft;
     },
     sellerCodeText() {
-      return document.querySelector("#seller-code-text")?.value || "";
+      return this.sellerCodeDraft;
     },
     parseCodeText(text, valueKey) {
       return text
@@ -840,7 +847,7 @@ createApp({
       await this.load();
     },
     async clearAuction() {
-      if (!confirm("确认清空本场所有成交数据和客户信息？代码和场次设置会保留。")) return;
+      if (!confirm("确认清空本场所有成交数据和客户信息？共享代码和场次设置会保留。")) return;
       const cleared = await this.api("/api/auction/clear", { method: "POST", body: JSON.stringify({}) });
       alert(`已清空 ${cleared.count} 条成交数据、${cleared.customers} 条客户信息`);
       this.clearSelection();
@@ -1355,7 +1362,7 @@ createApp({
             </div>
           </section>
           <section class="panel"><div class="panel-head"><h2>数据导入与清场</h2></div><div class="panel-body grid"><div class="form-grid"><div class="field"><label>导入 CSV</label><input type="file" accept=".csv,text/csv" @change="filePicked" /></div><label class="checkline"><input type="checkbox" v-model="csvCustomersOnly" /><span>只导入客户信息</span></label></div><div class="notice">CSV 表头可使用旧表字段：客户号牌、出货号牌、客户名称、拍品编号、货主出货号牌缩写、拍品名称缩写、拍品数量、买家客户号牌、千单位成交价。</div><div class="actions"><button class="primary" @click="importCsv">导入 CSV</button><button class="danger" @click="clearAuction">清空本场拍卖与客户数据</button></div><div class="muted">{{ importMessage }}</div></div></section>
-          <section class="code-grid"><section class="panel"><div class="panel-head"><h2>拍品代码</h2></div><div class="panel-body field"><label>每行：缩写,名称</label><textarea id="item-code-text" :value="codeText(state.itemCodes, 'name')"></textarea><div class="actions"><button class="primary" @click="saveItemCodes">保存拍品代码</button></div></div></section><section class="panel"><div class="panel-head"><h2>出货号牌代码</h2></div><div class="panel-body field"><label>每行：英文缩写,日文号牌</label><textarea id="seller-code-text" :value="codeText(state.sellerCodes, 'label')"></textarea><div class="actions"><button class="primary" @click="saveSellerCodes">保存号牌代码</button></div></div></section></section>
+          <section class="code-grid"><section class="panel"><div class="panel-head"><h2>拍品代码</h2></div><div class="panel-body field"><label>每行：缩写,名称</label><textarea id="item-code-text" v-model="itemCodeDraft"></textarea><div class="actions"><button class="primary" @click="saveItemCodes">保存拍品代码</button></div></div></section><section class="panel"><div class="panel-head"><h2>出货号牌代码</h2></div><div class="panel-body field"><label>每行：英文缩写,日文号牌</label><textarea id="seller-code-text" v-model="sellerCodeDraft"></textarea><div class="actions"><button class="primary" @click="saveSellerCodes">保存号牌代码</button></div></div></section></section>
         </section>
 
         <section v-else class="panel">

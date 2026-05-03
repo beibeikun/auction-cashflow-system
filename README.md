@@ -37,7 +37,7 @@ npm run dev
 - Vue 3：前端界面和状态管理。
 - Vite：开发服务器和生产构建。
 - Node.js 原生 HTTP 服务：API、SSE 协同刷新、生产静态文件服务。
-- JSON 文件存储：全局客户簿保存在 `data/store.json`，每个拍卖场次保存在 `data/sessions/<session-id>.json`。
+- JSON 文件存储：全局客户簿、拍品代码和出货号牌代码保存在 `data/store.json`，每个拍卖场次保存在 `data/sessions/<session-id>.json`。
 - Python 标准库脚本：从 `.xlsx` 导入初始数据。
 
 ## 工作区
@@ -46,7 +46,7 @@ npm run dev
 - `成交登记`：集中查看成交表，支持批量收款确认、付款确认、退货确认、清除确认和删除。
 - `精算结算`：按客户或客户簿引用生成买方应收、卖方应付和最终请款/打款额。
 - `客户资料`：维护本场客户登记和永久客户簿；可从客户簿引用老客户，也可新登记并自动加入客户簿。
-- `场次设置`：新建、切换、修改、删除拍卖场次，并维护当前场次名称、默认佣金率、精算传票公司资料、拍品代码和出货号牌代码。
+- `场次设置`：新建、切换、修改、删除拍卖场次，并维护当前场次名称、默认佣金率、精算传票公司资料、全场次共享的拍品代码和出货号牌代码。
 - `完整明细`：查看并导出与旧 Excel `完整信息` 类似的成交明细 CSV。
 
 ## 文档
@@ -67,7 +67,7 @@ python3 scripts/import_workbook_data.py "../docs/现金会v3.0.xlsx"
 python3 scripts/import_workbook_data.py "/path/to/现金会v3.0_alpha_0325现金会-2.xlsx"
 ```
 
-导入会覆盖当前拍卖场次对应的 `data/sessions/<session-id>.json`。如果还没有场次，脚本会先创建一个当前场次；共享永久客户簿仍保存在 `data/store.json`。
+导入会覆盖当前拍卖场次对应的 `data/sessions/<session-id>.json`，并用工作簿里的拍品代码、出货号牌代码更新全局共享代码表。如果还没有场次，脚本会先创建一个当前场次；共享永久客户簿和代码表保存在 `data/store.json`。
 
 ## 从 CSV 导入
 
@@ -80,15 +80,15 @@ python3 scripts/import_workbook_data.py "/path/to/现金会v3.0_alpha_0325现金
 拍品编号,货主出货号牌缩写,拍品名称缩写,拍品数量,买家客户号牌,千单位成交价
 ```
 
-`清空本场拍卖与客户数据` 会清空成交记录和本场客户登记，保留永久客户簿、代码和场次设置。
+`清空本场拍卖与客户数据` 会清空成交记录和本场客户登记，保留永久客户簿、全局共享代码和场次设置。
 
 ## 数据文件
 
 数据拆分保存为：
 
 ```text
-auction-app/data/store.json              # 全局配置、当前场次 ID、共享永久客户簿
-auction-app/data/sessions/*.json         # 各拍卖场次的设置、代码、本场客户、成交记录
+auction-app/data/store.json              # 全局配置、当前场次 ID、共享永久客户簿和共享代码表
+auction-app/data/sessions/*.json         # 各拍卖场次的设置、本场客户、成交记录
 auction-app/data/deleted-sessions/*.json # 从界面删除后移入的场次文件
 ```
 
