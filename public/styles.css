@@ -598,6 +598,26 @@ tr.selected td {
   color: #17202a;
 }
 
+.dashboard-screen.fullscreen-mode {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.dashboard-screen.fullscreen-mode,
+.dashboard-screen:fullscreen {
+  width: 100vw;
+  height: 100dvh;
+  min-height: 100dvh;
+  margin: 0;
+  padding: clamp(18px, 2vw, 30px);
+  overflow: auto;
+  background:
+    linear-gradient(135deg, rgba(15, 118, 110, 0.14), transparent 34%),
+    linear-gradient(315deg, rgba(249, 115, 22, 0.13), transparent 36%),
+    #f6f8fb;
+}
+
 .dashboard-hero {
   display: flex;
   justify-content: space-between;
@@ -630,6 +650,31 @@ tr.selected td {
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   color: #c2410c;
+}
+
+.dashboard-hero-actions {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.dashboard-fullscreen-button {
+  width: 42px;
+  min-height: 42px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border-color: #cbd5df;
+  background: rgba(255, 255, 255, 0.84);
+  color: #0f172a;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
+}
+
+.dashboard-fullscreen-button:hover {
+  border-color: #0f766e;
 }
 
 .dashboard-layout {
@@ -1157,6 +1202,10 @@ tr.selected td {
 
   .dashboard-hero {
     display: grid;
+  }
+
+  .dashboard-hero-actions {
+    justify-content: space-between;
   }
 
   .dashboard-hero h2 {

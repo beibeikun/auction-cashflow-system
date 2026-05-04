@@ -25,6 +25,7 @@ createApp({
       dealSortOrder: localStorage.getItem("auction.dealSortOrder") || "desc",
       selectedLots: new Set(),
       live: false,
+      isDashboardFullscreen: false,
       now: new Date(),
       clockTimer: null,
       liveEntryDirty: false,
@@ -332,6 +333,8 @@ createApp({
     await this.load();
     this.resetEntry(false);
     this.connectEvents();
+    document.addEventListener("fullscreenchange", this.handleFullscreenChange);
+    window.addEventListener("keydown", this.handleDashboardKeydown);
     this.clockTimer = setInterval(() => {
       this.now = new Date();
     }, 1000);
@@ -339,6 +342,8 @@ createApp({
   beforeUnmount() {
     if (this.clockTimer) clearInterval(this.clockTimer);
     if (this.liveEntrySyncTimer) clearTimeout(this.liveEntrySyncTimer);
+    document.removeEventListener("fullscreenchange", this.handleFullscreenChange);
+    window.removeEventListener("keydown", this.handleDashboardKeydown);
   },
   methods: {
     blankEntry() {
@@ -403,6 +408,32 @@ createApp({
     setTab(tab) {
       this.activeTab = tab;
       localStorage.setItem("auction.activeTab", tab);
+    },
+    async toggleDashboardFullscreen() {
+      const screen = this.$refs.dashboardScreen;
+      if (!screen) return;
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+      if (this.isDashboardFullscreen && !document.fullscreenElement) {
+        this.isDashboardFullscreen = false;
+        return;
+      }
+      try {
+        if (screen.requestFullscreen) await screen.requestFullscreen();
+        else this.isDashboardFullscreen = true;
+      } catch {
+        this.isDashboardFullscreen = true;
+      }
+    },
+    handleFullscreenChange() {
+      this.isDashboardFullscreen = document.fullscreenElement === this.$refs.dashboardScreen;
+    },
+    handleDashboardKeydown(event) {
+      if (event.key === "Escape" && this.isDashboardFullscreen && !document.fullscreenElement) {
+        this.isDashboardFullscreen = false;
+      }
     },
     resetSessionUiState() {
       if (this.liveEntrySyncTimer) clearTimeout(this.liveEntrySyncTimer);
@@ -995,14 +1026,19 @@ createApp({
       </nav>
 
       <main class="workspace">
-        <section v-if="activeTab === 'screen'" class="dashboard-screen">
+        <section v-if="activeTab === 'screen'" ref="dashboardScreen" class="dashboard-screen" :class="{ 'fullscreen-mode': isDashboardFullscreen }">
           <div class="dashboard-hero">
             <div>
               <div class="dashboard-kicker">{{ live ? "LIVE AUCTION" : "CONNECTING" }}</div>
               <h2>{{ state.meta.eventName || "现金拍卖会" }}</h2>
               <p>开拍 {{ state.meta.startTime }} · 数据 {{ formatTime(state.meta.updatedAt) }}</p>
             </div>
-            <div class="dashboard-clock">{{ dashboardClock }}</div>
+            <div class="dashboard-hero-actions">
+              <div class="dashboard-clock">{{ dashboardClock }}</div>
+              <button class="dashboard-fullscreen-button" @click="toggleDashboardFullscreen" :title="isDashboardFullscreen ? '退出全屏' : '进入全屏'" :aria-label="isDashboardFullscreen ? '退出全屏' : '进入全屏'">
+                <span aria-hidden="true">{{ isDashboardFullscreen ? "×" : "⛶" }}</span>
+              </button>
+            </div>
           </div>
 
           <div class="dashboard-layout">
