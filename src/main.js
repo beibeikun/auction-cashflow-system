@@ -611,14 +611,24 @@ createApp({
         this.entrySaveError = `请先填写：${missing.join("、")}`;
         return;
       }
+      const invalid = this.invalidEntryReferences();
+      if (invalid.length) {
+        this.entrySaveError = invalid.join("、");
+        return;
+      }
+      try {
+        if (this.editingLotId) {
+          const existing = this.state.lots.find((lot) => lot.id === this.editingLotId);
+          await this.api(`/api/lots/${this.editingLotId}`, { method: "PUT", body: JSON.stringify({ ...existing, ...this.entry }) });
+        } else {
+          await this.api("/api/lots", { method: "POST", body: JSON.stringify(this.entry) });
+        }
+      } catch (error) {
+        this.entrySaveError = this.lotSaveErrorMessage(error);
+        return;
+      }
       localStorage.setItem("auction.lastSellerCode", this.entry.sellerCode || "");
       localStorage.setItem("auction.lastItemCode", this.entry.itemCode || "");
-      if (this.editingLotId) {
-        const existing = this.state.lots.find((lot) => lot.id === this.editingLotId);
-        await this.api(`/api/lots/${this.editingLotId}`, { method: "PUT", body: JSON.stringify({ ...existing, ...this.entry }) });
-      } else {
-        await this.api("/api/lots", { method: "POST", body: JSON.stringify(this.entry) });
-      }
       await this.load();
       this.liveEntryDirty = false;
       this.resetEntry();
@@ -632,6 +642,31 @@ createApp({
         { key: "buyerNo", label: "买家号牌" },
         { key: "priceK", label: "千单位价" }
       ];
+    },
+    invalidEntryReferences() {
+      const sellerCode = String(this.entry.sellerCode || "").trim().toLowerCase();
+      const itemCode = String(this.entry.itemCode || "").trim().toLowerCase();
+      const buyerNo = this.number(this.entry.buyerNo);
+      const invalid = [];
+      if (!this.state.sellerCodes.some((row) => row.code === sellerCode)) invalid.push("货主缩写不存在");
+      if (!this.state.itemCodes.some((row) => row.code === itemCode)) invalid.push("拍品缩写不存在");
+      if (!this.state.customers.some((row) => Number(row.bidderNo) === buyerNo)) invalid.push("买家号牌未登记");
+      return invalid;
+    },
+    lotSaveErrorMessage(error) {
+      const fallback = "保存失败，请检查录入内容";
+      try {
+        const payload = JSON.parse(error.message || "{}");
+        if (payload.error !== "lot_reference_not_found") return fallback;
+        const labels = {
+          seller_code_not_found: "货主缩写不存在",
+          item_code_not_found: "拍品缩写不存在",
+          buyer_no_not_found: "买家号牌未登记"
+        };
+        return (payload.fields || []).map((field) => labels[field]).filter(Boolean).join("、") || fallback;
+      } catch {
+        return fallback;
+      }
     },
     markNoBid() {
       this.markEntryDirty();

@@ -383,6 +383,18 @@ function cleanLot(input, existing = {}) {
   };
 }
 
+function validateLotReferences(lot) {
+  const errors = [];
+  if (!store.sellerCodes.some((row) => row.code === lot.sellerCode)) errors.push("seller_code_not_found");
+  if (!store.itemCodes.some((row) => row.code === lot.itemCode)) errors.push("item_code_not_found");
+  if (lot.buyerNo === "" || !state.customers.some((row) => Number(row.bidderNo) === Number(lot.buyerNo))) errors.push("buyer_no_not_found");
+  return errors;
+}
+
+function lotEntryReferencesChanged(lot, existing = {}) {
+  return ["sellerCode", "itemCode", "buyerNo"].some((key) => String(lot[key] ?? "") !== String(existing[key] ?? ""));
+}
+
 function cleanCustomer(input, existing = {}) {
   return {
     id: existing.id || input.id || randomUUID(),
@@ -731,6 +743,8 @@ async function routeApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/lots") {
     const input = await readJson(req);
     const lot = cleanLot(input);
+    const errors = validateLotReferences(lot);
+    if (errors.length) return sendJson(res, 400, { error: "lot_reference_not_found", fields: errors });
     state.lots.push(lot);
     state.liveEntry = {};
     addAudit("新增成交", `${lot.itemNo || ""} ${lot.sellerCode}/${lot.itemCode}`);
@@ -777,7 +791,12 @@ async function routeApi(req, res, pathname) {
     const index = state.lots.findIndex((lot) => lot.id === id);
     if (index < 0) return sendJson(res, 404, { error: "lot_not_found" });
     const input = await readJson(req);
-    state.lots[index] = cleanLot(input, state.lots[index]);
+    const lot = cleanLot(input, state.lots[index]);
+    if (lotEntryReferencesChanged(lot, state.lots[index])) {
+      const errors = validateLotReferences(lot);
+      if (errors.length) return sendJson(res, 400, { error: "lot_reference_not_found", fields: errors });
+    }
+    state.lots[index] = lot;
     addAudit("更新成交", `${state.lots[index].itemNo || ""}`);
     await persistSession();
     broadcast();
